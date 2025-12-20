@@ -1,0 +1,31 @@
+services:
+  # Your main application
+  akasha:
+    build: ./your-app
+    ports:
+      - "8080:8080"
+    depends_on:
+      - whatsapp
+    environment:
+      - WHATSAPP_API_URL=http://whatsapp:3000
+
+  # WhatsApp service
+  whatsapp:
+    image: aldinokemal2104/go-whatsapp-web-multidevice
+    restart: always
+    ports:
+      - "3000:3000"  # Optional: expose externally for QR scanning
+    volumes:
+      - whatsapp_data:/app/storages
+    environment:
+      - APP_PORT=3000
+      - APP_DEBUG=false
+      - APP_BASIC_AUTH=your_user:your_password
+      - WHATSAPP_WEBHOOK=http://your-app:8080/webhook  # Internal Docker network
+      - WHATSAPP_WEBHOOK_SECRET=your-secret-key
+      - WHATSAPP_ACCOUNT_VALIDATION=true
+    command:
+      - rest
+
+volumes:
+  whatsapp_data:
