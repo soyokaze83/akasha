@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"c:\\\\Users\\\\Vincent Suhardi\\\\Projects\\\\akasha\" log --oneline -10)",
+      "Bash(uv sync:*)",
+      "Bash(uv run python:*)",
+      "Bash(uv pip install:*)"
+    ]
+  }
+}

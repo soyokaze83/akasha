@@ -1,31 +1,47 @@
 services:
-  # Your main application
+  # Akasha - Multi-Service WhatsApp Platform
   akasha:
-    build: ./your-app
+    build: .
+    container_name: akasha
+    restart: unless-stopped
     ports:
       - "8080:8080"
     depends_on:
-      - whatsapp
+      whatsapp:
+        condition: service_started
+    env_file:
+      - .env
     environment:
-      - WHATSAPP_API_URL=http://whatsapp:3000
+      - GOWA_BASE_URL=http://whatsapp:3000
+      - GOWA_USERNAME=user1
+      - GOWA_PASSWORD=pass1
+    networks:
+      - akasha-network
 
-  # WhatsApp service
+  # GoWA - WhatsApp Web Multi-device Service
   whatsapp:
     image: aldinokemal2104/go-whatsapp-web-multidevice
+    container_name: akasha-whatsapp
     restart: always
     ports:
-      - "3000:3000"  # Optional: expose externally for QR scanning
+      - "3000:3000"  # Expose for QR code scanning
     volumes:
       - whatsapp_data:/app/storages
     environment:
       - APP_PORT=3000
       - APP_DEBUG=false
-      - APP_BASIC_AUTH=your_user:your_password
-      - WHATSAPP_WEBHOOK=http://your-app:8080/webhook  # Internal Docker network
-      - WHATSAPP_WEBHOOK_SECRET=your-secret-key
+      - APP_BASIC_AUTH=user1:pass1
+      - WHATSAPP_WEBHOOK=http://akasha:8080/webhook
+      - WHATSAPP_WEBHOOK_SECRET=${GOWA_WEBHOOK_SECRET:-your-secret-key}
       - WHATSAPP_ACCOUNT_VALIDATION=true
     command:
       - rest
+    networks:
+      - akasha-network
+
+networks:
+  akasha-network:
+    driver: bridge
 
 volumes:
   whatsapp_data:
