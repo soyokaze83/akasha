@@ -33,7 +33,7 @@ class GeminiClient:
         prompt: str,
         system_instruction: Optional[str] = None,
         temperature: float = 0.8,
-        max_output_tokens: int = 2000,
+        max_output_tokens: int = 4000,
     ) -> str:
         """
         Generate content using Gemini.
