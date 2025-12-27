@@ -18,7 +18,7 @@ from src.core.logging import setup_logging
 from src.core.scheduler import start_scheduler, shutdown_scheduler, scheduler
 from src.core.gowa import gowa_client
 from src.services.mandarin_generator import router as mandarin_router
-from src.services.reply_agent import reply_agent
+from src.services.reply_agent import reply_agent, router as reply_agent_router
 
 # Setup logging first
 setup_logging()
@@ -63,6 +63,7 @@ app = FastAPI(
 
 # Include service routers
 app.include_router(mandarin_router)
+app.include_router(reply_agent_router)
 
 
 # Health check models

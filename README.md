@@ -14,6 +14,15 @@ Daily HSK 3-4 level Mandarin reading passages sent automatically via WhatsApp. P
 - Automatic daily scheduling with configurable time
 - Manual trigger via API
 
+### Reply Agent
+AI-powered WhatsApp assistant that responds to messages with web search capabilities.
+
+- Trigger with "hey akasha, <your question>" in any chat
+- Reply directly to Akasha's messages without trigger phrase to continue conversation
+- Web search integration for current information
+- Automatic LLM provider fallback (Gemini ↔ OpenAI) on rate limits
+- Supports multiple rotating API keys for high availability
+
 ### Chat Summarizer (Coming Soon)
 Summarize WhatsApp chat history using LLMs.
 
@@ -80,10 +89,14 @@ Summarize WhatsApp chat history using LLMs.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `LLM_PROVIDER` | No | `gemini` | LLM provider: `gemini` or `openai` |
-| `GEMINI_API_KEY` | If using Gemini | - | Google Gemini API key |
+| `LLM_FALLBACK_ENABLED` | No | `true` | Enable fallback to other provider on errors |
+| `GEMINI_API_KEY` | If using Gemini | - | Gemini API key (comma-separated for rotation) |
 | `GEMINI_MODEL` | No | `gemini-2.0-flash` | Gemini model to use |
 | `OPENAI_API_KEY` | If using OpenAI | - | OpenAI API key |
 | `OPENAI_MODEL` | No | `gpt-4o-mini` | OpenAI model to use |
+| `REPLY_AGENT_ENABLED` | No | `true` | Enable/disable the Reply Agent |
+| `GOOGLE_SEARCH_API_KEY` | For Reply Agent | - | Google Custom Search API key |
+| `GOOGLE_SEARCH_ENGINE_ID` | For Reply Agent | - | Google Custom Search Engine ID |
 | `WHATSAPP_RECIPIENTS` | Yes | - | Comma-separated recipient JIDs |
 | `DAILY_PASSAGE_HOUR` | No | `7` | Hour to send (0-23) |
 | `DAILY_PASSAGE_MINUTE` | No | `0` | Minute to send (0-59) |
@@ -111,6 +124,8 @@ Summarize WhatsApp chat history using LLMs.
 | POST | `/webhook` | GoWA webhook handler |
 | POST | `/mandarin/generate` | Generate and send passage |
 | POST | `/mandarin/trigger-daily` | Trigger daily job manually |
+| POST | `/reply-agent/query` | Process a query with the Reply Agent |
+| GET | `/reply-agent/status` | Get Reply Agent configuration status |
 
 ### Generate Passage
 
@@ -127,6 +142,28 @@ curl -X POST http://localhost:8080/mandarin/generate \
 curl -X POST http://localhost:8080/mandarin/generate \
   -H "Content-Type: application/json" \
   -d '{"recipient": "6281234567890@s.whatsapp.net"}'
+```
+
+### Reply Agent Query
+
+```bash
+# Simple query (response returned but not sent via WhatsApp)
+curl -X POST http://localhost:8080/reply-agent/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the capital of France?"}'
+
+# Query with quoted context (simulating a reply to a message)
+curl -X POST http://localhost:8080/reply-agent/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Can you explain this?", "quoted_context": "The mitochondria is the powerhouse of the cell."}'
+
+# Query and send response to WhatsApp
+curl -X POST http://localhost:8080/reply-agent/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What time is it in Tokyo?", "recipient": "6281234567890@s.whatsapp.net"}'
+
+# Check Reply Agent status
+curl http://localhost:8080/reply-agent/status
 ```
 
 ## Project Structure
@@ -148,6 +185,7 @@ akasha/
 │   │   └── openai.py             # OpenAI LLM client
 │   └── services/
 │       ├── mandarin_generator/   # Mandarin passage service
+│       ├── reply_agent/          # AI-powered reply assistant
 │       └── chat_summarizer/      # Chat summarization (future)
 ├── docker-compose.yml
 ├── Dockerfile
@@ -253,12 +291,27 @@ docker-compose up --build -d
 
 ### LLM rate limit errors (429)
 If you see `RESOURCE_EXHAUSTED` or rate limit errors:
-1. Switch to a different LLM provider in `.env`:
+1. Enable automatic fallback (enabled by default):
+   ```bash
+   LLM_FALLBACK_ENABLED=true
+   GEMINI_API_KEY=key1,key2,key3
+   OPENAI_API_KEY=sk-your-key
+   ```
+2. Or switch to a different LLM provider in `.env`:
    ```bash
    LLM_PROVIDER=openai
    OPENAI_API_KEY=sk-your-key
    ```
-2. Rebuild: `docker-compose up --build -d`
+3. Rebuild: `docker-compose up --build -d`
+
+### Reply Agent not responding
+1. Check if enabled: `curl http://localhost:8080/reply-agent/status`
+2. Verify trigger phrase: Messages must start with "hey akasha, "
+3. Check web search is configured (for current information queries):
+   ```bash
+   GOOGLE_SEARCH_API_KEY=your-key
+   GOOGLE_SEARCH_ENGINE_ID=your-cx-id
+   ```
 
 ## License
 
