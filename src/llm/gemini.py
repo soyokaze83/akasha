@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiClient:
-    """Client for Google Gemini LLM with automatic key rotation on rate limits."""
+    """Client for Google Gemini LLM with automatic key rotation on errors."""
 
     def __init__(self, model: Optional[str] = None):
         self.model = model or settings.gemini_model
@@ -27,7 +27,7 @@ class GeminiClient:
         max_output_tokens: int = 4000,
     ) -> str:
         """
-        Generate content using Gemini with automatic key rotation on rate limits.
+        Generate content using Gemini with automatic key rotation on errors.
 
         Args:
             prompt: User prompt
@@ -39,7 +39,7 @@ class GeminiClient:
             Generated text content
 
         Raises:
-            ClientError: If all API keys are rate limited
+            ClientError: If all API keys are exhausted
         """
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
@@ -64,20 +64,31 @@ class GeminiClient:
                 return response.text
 
             except ClientError as e:
-                # Check if it's a rate limit error (HTTP 429)
-                if "429" in str(e) or "quota" in str(e).lower():
+                error_str = str(e).lower()
+                # Check if error warrants trying next key
+                is_rotatable_error = (
+                    "429" in str(e)
+                    or "quota" in error_str
+                    or "rate" in error_str
+                    or "api_key_invalid" in error_str
+                    or "api key expired" in error_str
+                    or "invalid_argument" in error_str
+                    or "invalid api key" in error_str
+                )
+
+                if is_rotatable_error:
                     last_error = e
                     logger.warning(
-                        f"Rate limit hit on API key {attempt + 1}/{num_keys}, rotating..."
+                        f"API key {attempt + 1}/{num_keys} failed ({str(e)[:50]}...), rotating..."
                     )
                     self._rotator.rotate()
                 else:
-                    # Non-rate-limit error, re-raise immediately
+                    # Unexpected error, re-raise immediately
                     raise
 
         # All keys exhausted
-        logger.error("All Gemini API keys are rate limited")
-        raise last_error or ClientError("All API keys rate limited")
+        logger.error("All Gemini API keys exhausted")
+        raise last_error or ClientError("All API keys exhausted")
 
 
 # Singleton instance for dependency injection
