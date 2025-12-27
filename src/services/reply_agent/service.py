@@ -45,6 +45,8 @@ class ReplyAgentService:
         """
         Process a user query using the LLM with tool calling.
 
+        Supports automatic fallback to alternate provider if primary is exhausted.
+
         Args:
             query: User's question/request
             quoted_context: Optional quoted message the user is replying to
@@ -63,12 +65,50 @@ User's question/comment: {query}"""
         else:
             full_prompt = query
 
-        provider = settings.llm_provider.lower()
+        primary_provider = settings.llm_provider.lower()
+        fallback_provider = "openai" if primary_provider == "gemini" else "gemini"
 
+        # Try primary provider first
+        try:
+            return await self._call_provider(primary_provider, full_prompt)
+        except Exception as e:
+            error_str = str(e).lower()
+            is_exhaustion_error = (
+                "429" in str(e)
+                or "quota" in error_str
+                or "rate" in error_str
+                or "exhausted" in error_str
+                or "all api keys" in error_str
+            )
+
+            # If fallback is enabled and it's an exhaustion error, try fallback
+            if settings.llm_fallback_enabled and is_exhaustion_error:
+                if self._can_use_provider(fallback_provider):
+                    logger.warning(
+                        f"Primary provider '{primary_provider}' exhausted, "
+                        f"falling back to '{fallback_provider}'"
+                    )
+                    return await self._call_provider(fallback_provider, full_prompt)
+
+            # Re-raise if fallback not possible
+            raise
+
+    def _can_use_provider(self, provider: str) -> bool:
+        """Check if a provider has valid API keys configured."""
         if provider == "openai":
-            return await self._process_with_openai(full_prompt)
+            return bool(settings.openai_api_key)
         elif provider == "gemini":
-            return await self._process_with_gemini(full_prompt)
+            return bool(settings.gemini_api_key)
+        return False
+
+    async def _call_provider(
+        self, provider: str, prompt: str
+    ) -> tuple[str, list[str]]:
+        """Call the specified LLM provider."""
+        if provider == "openai":
+            return await self._process_with_openai(prompt)
+        elif provider == "gemini":
+            return await self._process_with_gemini(prompt)
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
 

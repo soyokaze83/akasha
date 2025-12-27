@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     llm_provider: str = "gemini"  # Options: "gemini", "openai"
+    llm_fallback_enabled: bool = True  # Enable fallback to other provider on exhaustion
 
     # Gemini Configuration (supports comma-separated keys for rotation)
     gemini_api_key: str = ""
