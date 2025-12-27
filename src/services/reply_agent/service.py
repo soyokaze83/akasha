@@ -73,19 +73,27 @@ User's question/comment: {query}"""
             return await self._call_provider(primary_provider, full_prompt)
         except Exception as e:
             error_str = str(e).lower()
-            is_exhaustion_error = (
+
+            # Check if this is an error that warrants trying the fallback provider
+            is_fallback_worthy_error = (
+                # Rate limit / quota errors
                 "429" in str(e)
                 or "quota" in error_str
                 or "rate" in error_str
                 or "exhausted" in error_str
                 or "all api keys" in error_str
+                # Invalid/expired API key errors
+                or "api_key_invalid" in error_str
+                or "api key expired" in error_str
+                or "invalid_argument" in error_str
+                or "invalid api key" in error_str
             )
 
-            # If fallback is enabled and it's an exhaustion error, try fallback
-            if settings.llm_fallback_enabled and is_exhaustion_error:
+            # If fallback is enabled and it's a fallback-worthy error, try fallback
+            if settings.llm_fallback_enabled and is_fallback_worthy_error:
                 if self._can_use_provider(fallback_provider):
                     logger.warning(
-                        f"Primary provider '{primary_provider}' exhausted, "
+                        f"Primary provider '{primary_provider}' failed ({type(e).__name__}), "
                         f"falling back to '{fallback_provider}'"
                     )
                     return await self._call_provider(fallback_provider, full_prompt)
