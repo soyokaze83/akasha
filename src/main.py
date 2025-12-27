@@ -205,9 +205,38 @@ async def handle_webhook(request: Request) -> dict:
 
                 except Exception as e:
                     logger.exception(f"Reply Agent error: {e}")
+
+                    # Determine user-friendly error message based on error type
+                    error_str = str(e).lower()
+                    if "429" in str(e) or "quota" in error_str or "rate" in error_str:
+                        error_message = (
+                            "I'm currently experiencing high demand and hit my rate limit. "
+                            "Please wait a moment and try again."
+                        )
+                    elif "exhausted" in error_str or "all api keys" in error_str:
+                        error_message = (
+                            "All my API resources are temporarily exhausted. "
+                            "Please try again in a few minutes."
+                        )
+                    elif "timeout" in error_str:
+                        error_message = (
+                            "The request took too long to process. "
+                            "Please try again with a simpler question."
+                        )
+                    elif "api" in error_str and "key" in error_str:
+                        error_message = (
+                            "I'm having trouble connecting to my AI service. "
+                            "Please notify the administrator."
+                        )
+                    else:
+                        error_message = (
+                            "Sorry, I encountered an error processing your request. "
+                            "Please try again."
+                        )
+
                     error_result = await gowa_client.send_message(
                         phone=reply_jid,
-                        message="Sorry, I encountered an error processing your request. Please try again.",
+                        message=error_message,
                         reply_message_id=message_id,
                     )
                     # Also track error message IDs so user can reply to them
