@@ -2,6 +2,8 @@
 
 A multi-service WhatsApp platform built with FastAPI that integrates with [GoWA](https://github.com/aldinokemal/go-whatsapp-web-multidevice) (go-whatsapp-web-multidevice).
 
+Mostly for my personal needs but feel free to setup for personal usage as well.
+
 ## Services
 
 ### Mandarin Generator

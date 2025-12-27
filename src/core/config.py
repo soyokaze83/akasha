@@ -27,13 +27,25 @@ class Settings(BaseSettings):
     # LLM Configuration
     llm_provider: str = "gemini"  # Options: "gemini", "openai"
 
-    # Gemini Configuration
+    # Gemini Configuration (supports comma-separated keys for rotation)
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
+
+    @property
+    def gemini_api_keys(self) -> list[str]:
+        """Parse comma-separated Gemini API keys into list."""
+        if not self.gemini_api_key:
+            return []
+        return [k.strip() for k in self.gemini_api_key.split(",") if k.strip()]
 
     # OpenAI Configuration
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+
+    # Reply Agent - Google Search Configuration
+    google_search_api_key: str = ""
+    google_search_engine_id: str = ""
+    reply_agent_enabled: bool = True
 
     # Mandarin Generator - Recipients (comma-separated JIDs)
     whatsapp_recipients: str = ""
