@@ -160,6 +160,36 @@ class GowaClient:
             logger.info(f"Downloaded media from message {message_id}: {mime_type}, {len(response.content)} bytes")
             return response.content, mime_type
 
+    async def download_media_from_path(self, file_path: str) -> tuple[bytes, str]:
+        """
+        Download media from a static file path (when auto-download is enabled).
+
+        When GoWA auto-downloads media, the webhook includes a file_path.
+        This method fetches the file from GoWA's static file server.
+
+        Args:
+            file_path: The file path from webhook (e.g., "statics/media/...")
+
+        Returns:
+            Tuple of (media_bytes, mime_type)
+
+        Raises:
+            GowaClientError: If media download fails
+        """
+        async with self._get_client() as client:
+            # GoWA serves static files at the root path
+            response = await client.get(f"/{file_path}")
+            response.raise_for_status()
+
+            content_type = response.headers.get("Content-Type", "application/octet-stream")
+            mime_type = content_type.split(";")[0].strip()
+
+            if mime_type == "application/json":
+                raise GowaClientError(f"Failed to download media from path: {file_path}")
+
+            logger.info(f"Downloaded media from path {file_path}: {mime_type}, {len(response.content)} bytes")
+            return response.content, mime_type
+
 
 # Singleton instance for dependency injection
 gowa_client = GowaClient()

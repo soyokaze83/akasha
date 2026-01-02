@@ -28,18 +28,29 @@ logger = logging.getLogger(__name__)
 # Key: message_id, Value: timestamp (for cleanup)
 akasha_message_ids: dict[str, float] = {}
 
+# In-memory cache for media file paths from auto-downloaded images
+# Key: message_id, Value: (file_path, timestamp)
+media_file_paths: dict[str, tuple[str, float]] = {}
+
 # Cleanup threshold: 24 hours
 MESSAGE_ID_TTL = 86400
 
 
 def cleanup_old_message_ids() -> None:
-    """Remove message IDs older than 24 hours."""
+    """Remove message IDs and media paths older than 24 hours."""
     cutoff = time.time() - MESSAGE_ID_TTL
     expired = [k for k, v in akasha_message_ids.items() if v < cutoff]
     for k in expired:
         del akasha_message_ids[k]
     if expired:
         logger.debug(f"Cleaned up {len(expired)} old message IDs")
+
+    # Also cleanup old media file paths
+    expired_media = [k for k, v in media_file_paths.items() if v[1] < cutoff]
+    for k in expired_media:
+        del media_file_paths[k]
+    if expired_media:
+        logger.debug(f"Cleaned up {len(expired_media)} old media file paths")
 
 
 @asynccontextmanager
@@ -150,6 +161,13 @@ async def handle_webhook(request: Request) -> dict:
 
         logger.info(f"Webhook received: type={event_type}, from={sender} ({sender_jid})")
 
+        # Cache file_path for any incoming media (for later reply-to-image lookups)
+        file_path = payload.get("file_path")
+        media_message_id = payload.get("id")
+        if file_path and media_message_id:
+            media_file_paths[media_message_id] = (file_path, time.time())
+            logger.info(f"Cached media file path for message {media_message_id}: {file_path}")
+
         # Debug: log reply-related fields
         if replied_id or quoted_message:
             logger.info(f"Reply context: replied_id={replied_id}, quoted_message={quoted_message[:50] if quoted_message else 'None'}...")
@@ -194,15 +212,27 @@ async def handle_webhook(request: Request) -> dict:
                 if replied_id:
                     chat_id = payload.get("chat_id") or sender_jid
                     phone_for_download = chat_id.split(" in ")[0] if " in " in chat_id else chat_id
-                    try:
-                        quoted_image_data, quoted_image_mime = await gowa_client.download_media(
-                            message_id=replied_id,
-                            phone=phone_for_download,
-                        )
-                        logger.info(f"Downloaded quoted image: {quoted_image_mime}, {len(quoted_image_data)} bytes")
-                    except Exception as e:
-                        # Not an image or download failed - that's fine, continue without image
-                        logger.debug(f"No downloadable media in quoted message {replied_id}: {e}")
+
+                    # First, try to get from cached file path (when GoWA auto-downloads)
+                    if replied_id in media_file_paths:
+                        cached_path, _ = media_file_paths[replied_id]
+                        try:
+                            quoted_image_data, quoted_image_mime = await gowa_client.download_media_from_path(cached_path)
+                            logger.info(f"Downloaded quoted image from cached path: {quoted_image_mime}, {len(quoted_image_data)} bytes")
+                        except Exception as e:
+                            logger.warning(f"Failed to download from cached path {cached_path}: {e}")
+
+                    # Fallback: try on-demand download API (when auto-download is disabled)
+                    if not quoted_image_data:
+                        try:
+                            quoted_image_data, quoted_image_mime = await gowa_client.download_media(
+                                message_id=replied_id,
+                                phone=phone_for_download,
+                            )
+                            logger.info(f"Downloaded quoted image via API: {quoted_image_mime}, {len(quoted_image_data)} bytes")
+                        except Exception as e:
+                            # Not an image or download failed - that's fine, continue without image
+                            logger.debug(f"No downloadable media in quoted message {replied_id}: {e}")
 
                 try:
                     response_text, sources = await reply_agent.process_query(
@@ -302,11 +332,25 @@ async def handle_webhook(request: Request) -> dict:
                     reply_jid = sender_jid.split(" in ")[1]
 
                 try:
-                    # Download image on-demand via GoWA API
-                    image_bytes, mime_type = await gowa_client.download_media(
-                        message_id=payload_id,
-                        phone=chat_id.split(" in ")[0] if " in " in chat_id else chat_id,
-                    )
+                    # Try to download image - first from cached file path, then via API
+                    image_bytes = None
+                    mime_type = None
+
+                    # Try cached file path first (when GoWA auto-downloads)
+                    if payload_id in media_file_paths:
+                        cached_path, _ = media_file_paths[payload_id]
+                        try:
+                            image_bytes, mime_type = await gowa_client.download_media_from_path(cached_path)
+                            logger.info(f"Downloaded image from cached path: {mime_type}, {len(image_bytes)} bytes")
+                        except Exception as e:
+                            logger.warning(f"Failed to download from cached path {cached_path}: {e}")
+
+                    # Fallback: try on-demand download API
+                    if not image_bytes:
+                        image_bytes, mime_type = await gowa_client.download_media(
+                            message_id=payload_id,
+                            phone=chat_id.split(" in ")[0] if " in " in chat_id else chat_id,
+                        )
 
                     # Use caption as query, or default to asking about the image
                     if not query:
