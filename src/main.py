@@ -161,6 +161,9 @@ async def handle_webhook(request: Request) -> dict:
 
         logger.info(f"Webhook received: type={event_type}, from={sender} ({sender_jid})")
 
+        # Debug: log full payload to understand structure
+        logger.debug(f"Full webhook payload: {payload}")
+
         # Cache file_path for any incoming media (for later reply-to-image lookups)
         file_path = payload.get("file_path")
         media_message_id = payload.get("id")
@@ -213,8 +216,18 @@ async def handle_webhook(request: Request) -> dict:
                     chat_id = payload.get("chat_id") or sender_jid
                     phone_for_download = chat_id.split(" in ")[0] if " in " in chat_id else chat_id
 
-                    # First, try to get from cached file path (when GoWA auto-downloads)
-                    if replied_id in media_file_paths:
+                    # GoWA may include file_path for quoted media directly in the webhook
+                    quoted_file_path = payload.get("file_path")
+                    if quoted_file_path:
+                        logger.info(f"Found file_path in webhook for quoted message: {quoted_file_path}")
+                        try:
+                            quoted_image_data, quoted_image_mime = await gowa_client.download_media_from_path(quoted_file_path)
+                            logger.info(f"Downloaded quoted image from webhook file_path: {quoted_image_mime}, {len(quoted_image_data)} bytes")
+                        except Exception as e:
+                            logger.warning(f"Failed to download from webhook file_path {quoted_file_path}: {e}")
+
+                    # Try cached file path (from previous image webhooks)
+                    if not quoted_image_data and replied_id in media_file_paths:
                         cached_path, _ = media_file_paths[replied_id]
                         try:
                             quoted_image_data, quoted_image_mime = await gowa_client.download_media_from_path(cached_path)
