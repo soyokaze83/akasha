@@ -20,7 +20,7 @@ services:
 
   # GoWA - WhatsApp Web Multi-device Service
   whatsapp:
-    image: aldinokemal2104/go-whatsapp-web-multidevice
+    image: aldinokemal2104/go-whatsapp-web-multidevice:v7.9.0
     container_name: akasha-whatsapp
     restart: always
     ports:
@@ -34,10 +34,7 @@ services:
       - WHATSAPP_WEBHOOK=http://akasha:8080/webhook
       - WHATSAPP_WEBHOOK_SECRET=${GOWA_WEBHOOK_SECRET:-your-secret-key}
       - WHATSAPP_ACCOUNT_VALIDATION=true
-      - WHATSAPP_AUTO_DOWNLOAD_MEDIA=false
-    command:
-      - rest
-      - --auto-download-media=false
+      - whatsapp_auto_download_media=false
     networks:
       - akasha-network
 
