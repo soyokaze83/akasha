@@ -147,15 +147,27 @@ class GowaClient:
             # Strip any charset or parameters (e.g., "image/jpeg; charset=utf-8" -> "image/jpeg")
             mime_type = content_type.split(";")[0].strip()
 
-            # GoWA returns JSON with error info if message has no downloadable media
-            # Check if response is JSON (error) instead of binary media
+            # GoWA returns JSON instead of binary in two cases:
+            # 1. Error - no downloadable media
+            # 2. Success - media was auto-downloaded to disk, returns file path
             if mime_type == "application/json":
                 try:
-                    error_data = response.json()
-                    error_msg = error_data.get("message", "Unknown error")
-                    raise GowaClientError(f"No downloadable media: {error_msg}")
-                except (ValueError, KeyError):
-                    raise GowaClientError("No downloadable media in message")
+                    json_data = response.json()
+                    message = json_data.get("message", "")
+
+                    # Check if it's a success response with file path
+                    # Format: "Media downloaded successfully to statics/media/..."
+                    if "downloaded successfully to" in message:
+                        # Extract file path from message
+                        file_path = message.split("downloaded successfully to ")[-1].strip()
+                        logger.info(f"Media was auto-downloaded, fetching from path: {file_path}")
+                        # Fetch the file from the static path
+                        return await self.download_media_from_path(file_path)
+
+                    # Otherwise it's an error
+                    raise GowaClientError(f"No downloadable media: {message}")
+                except (ValueError, KeyError) as e:
+                    raise GowaClientError(f"No downloadable media in message: {e}")
 
             logger.info(f"Downloaded media from message {message_id}: {mime_type}, {len(response.content)} bytes")
             return response.content, mime_type
