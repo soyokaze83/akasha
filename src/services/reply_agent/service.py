@@ -247,7 +247,7 @@ User's question/comment: {query}"""
         if image_data and image_mime_type:
             parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
             logger.info(f"Gemini processing multimodal query with image ({image_mime_type})")
-        parts.append(types.Part.from_text(query))
+        parts.append(types.Part.from_text(text=query))
 
         contents: list[types.Content] = [
             types.Content(role="user", parts=parts)
