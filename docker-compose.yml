@@ -37,6 +37,7 @@ services:
       - WHATSAPP_AUTO_DOWNLOAD_MEDIA=false
     command:
       - rest
+      - --auto-download-media=false
     networks:
       - akasha-network
 
