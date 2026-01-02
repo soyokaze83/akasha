@@ -133,7 +133,7 @@ class GowaClient:
             Tuple of (media_bytes, mime_type)
 
         Raises:
-            GowaClientError: If media download fails
+            GowaClientError: If media download fails or message has no media
         """
         async with self._get_client() as client:
             response = await client.get(
@@ -146,6 +146,16 @@ class GowaClient:
             content_type = response.headers.get("Content-Type", "application/octet-stream")
             # Strip any charset or parameters (e.g., "image/jpeg; charset=utf-8" -> "image/jpeg")
             mime_type = content_type.split(";")[0].strip()
+
+            # GoWA returns JSON with error info if message has no downloadable media
+            # Check if response is JSON (error) instead of binary media
+            if mime_type == "application/json":
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", "Unknown error")
+                    raise GowaClientError(f"No downloadable media: {error_msg}")
+                except (ValueError, KeyError):
+                    raise GowaClientError("No downloadable media in message")
 
             logger.info(f"Downloaded media from message {message_id}: {mime_type}, {len(response.content)} bytes")
             return response.content, mime_type
