@@ -188,9 +188,28 @@ async def handle_webhook(request: Request) -> dict:
                     # Group message - reply to the group, not the individual
                     reply_jid = sender_jid.split(" in ")[1]
 
+                # Check if user is replying to an image message (try to download quoted media)
+                quoted_image_data = None
+                quoted_image_mime = None
+                if replied_id:
+                    chat_id = payload.get("chat_id") or sender_jid
+                    phone_for_download = chat_id.split(" in ")[0] if " in " in chat_id else chat_id
+                    try:
+                        quoted_image_data, quoted_image_mime = await gowa_client.download_media(
+                            message_id=replied_id,
+                            phone=phone_for_download,
+                        )
+                        logger.info(f"Downloaded quoted image: {quoted_image_mime}, {len(quoted_image_data)} bytes")
+                    except Exception as e:
+                        # Not an image or download failed - that's fine, continue without image
+                        logger.debug(f"No downloadable media in quoted message {replied_id}: {e}")
+
                 try:
                     response_text, sources = await reply_agent.process_query(
-                        query, quoted_context
+                        query=query,
+                        quoted_context=quoted_context,
+                        image_data=quoted_image_data,
+                        image_mime_type=quoted_image_mime,
                     )
 
                     result = await gowa_client.send_message(
