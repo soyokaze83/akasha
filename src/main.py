@@ -239,6 +239,10 @@ async def handle_webhook(request: Request) -> dict:
 
                     # Fallback: try on-demand download API (when auto-download is disabled)
                     if not quoted_image_data:
+                        # Ensure phone has the right format (with @s.whatsapp.net suffix)
+                        if not phone_for_download.endswith("@s.whatsapp.net"):
+                            phone_for_download = f"{phone_for_download}@s.whatsapp.net"
+                        logger.info(f"Attempting download API with message_id={replied_id}, phone={phone_for_download}")
                         try:
                             quoted_image_data, quoted_image_mime = await gowa_client.download_media(
                                 message_id=replied_id,
@@ -246,8 +250,8 @@ async def handle_webhook(request: Request) -> dict:
                             )
                             logger.info(f"Downloaded quoted image via API: {quoted_image_mime}, {len(quoted_image_data)} bytes")
                         except Exception as e:
-                            # Not an image or download failed - that's fine, continue without image
-                            logger.debug(f"No downloadable media in quoted message {replied_id}: {e}")
+                            # Log the actual error to understand why download failed
+                            logger.warning(f"Failed to download media for quoted message {replied_id}: {e}")
 
                 try:
                     response_text, sources = await reply_agent.process_query(
