@@ -1,5 +1,6 @@
 """FastAPI router for Reply Agent service."""
 
+import base64
 import logging
 
 from fastapi import APIRouter
@@ -22,13 +23,25 @@ async def process_query(request: QueryRequest) -> QueryResponse:
 
     - Uses the configured LLM provider (Gemini or OpenAI) with automatic fallback
     - Can optionally include quoted context for reply-aware responses
+    - Supports multimodal queries with base64-encoded images
     - If recipient is provided, sends the response via WhatsApp
     - Returns the response and any sources used from web search
     """
+    # Decode base64 image if provided
+    image_data = None
+    if request.image_base64:
+        try:
+            image_data = base64.b64decode(request.image_base64)
+            logger.info(f"Decoded image: {len(image_data)} bytes, type: {request.image_mime_type}")
+        except Exception as e:
+            logger.error(f"Failed to decode base64 image: {e}")
+
     # Process the query
     response_text, sources = await reply_agent.process_query(
         query=request.query,
         quoted_context=request.quoted_context,
+        image_data=image_data,
+        image_mime_type=request.image_mime_type,
     )
 
     # Determine which provider was used (for debugging/info)

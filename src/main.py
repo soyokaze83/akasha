@@ -134,9 +134,15 @@ async def handle_webhook(request: Request) -> dict:
         replied_id = message_data.get("replied_id", "")
         quoted_message = message_data.get("quoted_message", "")
 
+        # Check for image message (with auto-download disabled, image is an object)
+        image_info = payload.get("image")
+        has_image = isinstance(image_info, dict)
+
         # Determine event type from payload structure
         if payload.get("reaction"):
             event_type = "reaction"
+        elif has_image:
+            event_type = "message.image"
         elif message_text:
             event_type = "message.text"
         else:
@@ -152,7 +158,7 @@ async def handle_webhook(request: Request) -> dict:
         # Lazy cleanup of old message IDs
         cleanup_old_message_ids()
 
-        # Handle Reply Agent triggers
+        # Handle Reply Agent triggers for text messages
         if settings.reply_agent_enabled and event_type == "message.text" and message_text:
             # Check if replying to Akasha's message (no prefix needed)
             is_reply_to_akasha = replied_id and replied_id in akasha_message_ids
@@ -241,6 +247,103 @@ async def handle_webhook(request: Request) -> dict:
                         reply_message_id=message_id,
                     )
                     # Also track error message IDs so user can reply to them
+                    sent_message_id = error_result.get("message_id")
+                    if sent_message_id:
+                        akasha_message_ids[sent_message_id] = time.time()
+
+        # Handle Reply Agent triggers for image messages
+        elif settings.reply_agent_enabled and event_type == "message.image" and image_info:
+            # Get image caption and message ID for download
+            image_caption = image_info.get("caption", "")
+            payload_id = payload.get("id", "")
+            chat_id = payload.get("chat_id") or sender_jid
+
+            # Check if replying to Akasha's message
+            is_reply_to_akasha = replied_id and replied_id in akasha_message_ids
+
+            # Determine if should trigger and extract query
+            should_process = False
+            query = ""
+
+            if image_caption.lower().startswith(reply_agent.TRIGGER_PHRASE):
+                # "hey akasha, ..." in caption - extract query
+                query = image_caption[len(reply_agent.TRIGGER_PHRASE):].strip()
+                should_process = True
+                logger.info(f"Reply Agent (image) triggered by {sender}: {query}")
+            elif is_reply_to_akasha:
+                # Replying to Akasha with an image - use caption or default prompt
+                query = image_caption.strip() if image_caption else ""
+                should_process = True
+                logger.info(f"Reply Agent (image) triggered by reply to Akasha from {sender}")
+
+            if should_process and payload_id:
+                # Extract reply JID - handle group messages
+                reply_jid = sender_jid
+                if " in " in sender_jid:
+                    reply_jid = sender_jid.split(" in ")[1]
+
+                try:
+                    # Download image on-demand via GoWA API
+                    image_bytes, mime_type = await gowa_client.download_media(
+                        message_id=payload_id,
+                        phone=chat_id.split(" in ")[0] if " in " in chat_id else chat_id,
+                    )
+
+                    # Use caption as query, or default to asking about the image
+                    if not query:
+                        query = "What is in this image?"
+
+                    response_text, sources = await reply_agent.process_query(
+                        query=query,
+                        image_data=image_bytes,
+                        image_mime_type=mime_type,
+                    )
+
+                    result = await gowa_client.send_message(
+                        phone=reply_jid,
+                        message=response_text,
+                        reply_message_id=payload_id,
+                    )
+
+                    # Track Akasha's sent message ID
+                    sent_message_id = result.get("message_id")
+                    if sent_message_id:
+                        akasha_message_ids[sent_message_id] = time.time()
+                        logger.info(f"Tracked message ID: {sent_message_id}")
+
+                    logger.info(f"Reply Agent (image) response sent to {reply_jid}")
+
+                except Exception as e:
+                    logger.exception(f"Reply Agent (image) error: {e}")
+
+                    # User-friendly error message
+                    error_str = str(e).lower()
+                    if "download" in error_str or "media" in error_str:
+                        error_message = (
+                            "I couldn't download the image. "
+                            "Please try sending it again."
+                        )
+                    elif "429" in str(e) or "quota" in error_str or "rate" in error_str:
+                        error_message = (
+                            "I'm currently experiencing high demand. "
+                            "Please wait a moment and try again."
+                        )
+                    elif "exhausted" in error_str or "all api keys" in error_str:
+                        error_message = (
+                            "All my API resources are temporarily exhausted. "
+                            "Please try again in a few minutes."
+                        )
+                    else:
+                        error_message = (
+                            "Sorry, I couldn't process the image. "
+                            "Please try again."
+                        )
+
+                    error_result = await gowa_client.send_message(
+                        phone=reply_jid,
+                        message=error_message,
+                        reply_message_id=payload_id,
+                    )
                     sent_message_id = error_result.get("message_id")
                     if sent_message_id:
                         akasha_message_ids[sent_message_id] = time.time()

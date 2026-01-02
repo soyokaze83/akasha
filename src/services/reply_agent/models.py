@@ -32,6 +32,13 @@ class QueryRequest(BaseModel):
         None,
         description="WhatsApp JID to send the response to. If not provided, response is returned but not sent.",
     )
+    image_base64: Optional[str] = Field(
+        None, description="Base64-encoded image data for multimodal queries"
+    )
+    image_mime_type: Optional[str] = Field(
+        None,
+        description="MIME type of the image (e.g., image/jpeg, image/png, image/webp)",
+    )
 
 
 class QueryResponse(BaseModel):

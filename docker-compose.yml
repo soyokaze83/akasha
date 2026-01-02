@@ -34,6 +34,7 @@ services:
       - WHATSAPP_WEBHOOK=http://akasha:8080/webhook
       - WHATSAPP_WEBHOOK_SECRET=${GOWA_WEBHOOK_SECRET:-your-secret-key}
       - WHATSAPP_ACCOUNT_VALIDATION=true
+      - WHATSAPP_AUTO_DOWNLOAD_MEDIA=false
     command:
       - rest
     networks:

@@ -1,5 +1,6 @@
 """Reply Agent service with tool calling support."""
 
+import base64
 import json
 import logging
 from typing import Optional
@@ -40,16 +41,23 @@ class ReplyAgentService:
         return message[len(self.TRIGGER_PHRASE) :].strip()
 
     async def process_query(
-        self, query: str, quoted_context: Optional[str] = None
+        self,
+        query: str,
+        quoted_context: Optional[str] = None,
+        image_data: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
     ) -> tuple[str, list[str]]:
         """
         Process a user query using the LLM with tool calling.
 
         Supports automatic fallback to alternate provider if primary is exhausted.
+        Supports multimodal queries with images.
 
         Args:
             query: User's question/request
             quoted_context: Optional quoted message the user is replying to
+            image_data: Optional image bytes for multimodal queries
+            image_mime_type: MIME type of the image (e.g., "image/jpeg")
 
         Returns:
             Tuple of (response text, list of source URLs used)
@@ -70,7 +78,9 @@ User's question/comment: {query}"""
 
         # Try primary provider first
         try:
-            return await self._call_provider(primary_provider, full_prompt)
+            return await self._call_provider(
+                primary_provider, full_prompt, image_data, image_mime_type
+            )
         except Exception as e:
             error_str = str(e).lower()
 
@@ -96,7 +106,9 @@ User's question/comment: {query}"""
                         f"Primary provider '{primary_provider}' failed ({type(e).__name__}), "
                         f"falling back to '{fallback_provider}'"
                     )
-                    return await self._call_provider(fallback_provider, full_prompt)
+                    return await self._call_provider(
+                        fallback_provider, full_prompt, image_data, image_mime_type
+                    )
 
             # Re-raise if fallback not possible
             raise
@@ -110,24 +122,48 @@ User's question/comment: {query}"""
         return False
 
     async def _call_provider(
-        self, provider: str, prompt: str
+        self,
+        provider: str,
+        prompt: str,
+        image_data: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
     ) -> tuple[str, list[str]]:
         """Call the specified LLM provider."""
         if provider == "openai":
-            return await self._process_with_openai(prompt)
+            return await self._process_with_openai(prompt, image_data, image_mime_type)
         elif provider == "gemini":
-            return await self._process_with_gemini(prompt)
+            return await self._process_with_gemini(prompt, image_data, image_mime_type)
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
 
-    async def _process_with_openai(self, query: str) -> tuple[str, list[str]]:
-        """Process query using OpenAI with function calling."""
+    async def _process_with_openai(
+        self,
+        query: str,
+        image_data: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
+    ) -> tuple[str, list[str]]:
+        """Process query using OpenAI with function calling and optional image."""
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+        # Build user content - either simple text or multimodal with image
+        if image_data and image_mime_type:
+            b64_image = base64.b64encode(image_data).decode()
+            user_content: list[dict] | str = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{image_mime_type};base64,{b64_image}"},
+                },
+                {"type": "text", "text": query},
+            ]
+            logger.info(f"OpenAI processing multimodal query with image ({image_mime_type})")
+        else:
+            user_content = query
+
         messages: list[dict] = [
             {"role": "system", "content": SYSTEM_INSTRUCTION},
-            {"role": "user", "content": query},
+            {"role": "user", "content": user_content},
         ]
         sources_used: list[str] = []
 
@@ -170,8 +206,13 @@ User's question/comment: {query}"""
         )
         return response.choices[0].message.content or "", sources_used
 
-    async def _process_with_gemini(self, query: str) -> tuple[str, list[str]]:
-        """Process query using Gemini with tool calling and key rotation."""
+    async def _process_with_gemini(
+        self,
+        query: str,
+        image_data: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
+    ) -> tuple[str, list[str]]:
+        """Process query using Gemini with tool calling, key rotation, and optional image."""
         from google.genai import types
         from google.genai.errors import ClientError
 
@@ -201,8 +242,15 @@ User's question/comment: {query}"""
             )
         ]
 
+        # Build content parts - text only or multimodal with image
+        parts: list[types.Part] = []
+        if image_data and image_mime_type:
+            parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
+            logger.info(f"Gemini processing multimodal query with image ({image_mime_type})")
+        parts.append(types.Part.from_text(query))
+
         contents: list[types.Content] = [
-            types.Content(role="user", parts=[types.Part(text=query)])
+            types.Content(role="user", parts=parts)
         ]
 
         async def call_with_rotation(config: types.GenerateContentConfig):

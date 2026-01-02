@@ -124,6 +124,21 @@ file: <binary file>
 caption: Optional caption
 ```
 
+### Media Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/message/{message_id}/download` | Download media from a message on-demand |
+
+**Download Media Example:**
+```http
+GET /message/3EB0C127D7BACC83D6A3/download?phone=6289685028129@s.whatsapp.net
+```
+
+**Response:** Binary media content with `Content-Type` header indicating MIME type.
+
+> **Note:** This endpoint is used when `WHATSAPP_AUTO_DOWNLOAD_MEDIA=false` is set. The webhook provides the message ID, and media is fetched on-demand.
+
 ### Chat Operations
 
 | Method | Endpoint | Description |
@@ -204,13 +219,39 @@ Every webhook includes these common fields:
 | Type | Description | Additional Fields |
 |------|-------------|-------------------|
 | `message.text` | Text message received | `message`, `message_id`, `from_me` |
-| `message.image` | Image received | `image_path`, `mime_type`, `caption` |
+| `message.image` | Image received | `image` (object), `id`, `caption` |
 | `message.video` | Video received | `video_path`, `mime_type` |
 | `message.audio` | Audio received | `audio_path`, `mime_type` |
 | `message.document` | Document received | `document_path`, `filename` |
 | `message.reaction` | Reaction to message | `reaction`, `message_id_reacted` |
 | `message.revoked` | Message deleted | `message_id` |
 | `group.participants` | Group membership change | `action`, `participants` |
+
+### Image Message Webhook (Auto-Download Disabled)
+
+When `WHATSAPP_AUTO_DOWNLOAD_MEDIA=false` is set, image messages arrive with metadata only (no file path). The image must be downloaded on-demand via the `/message/{id}/download` API.
+
+**Webhook Payload:**
+```json
+{
+  "id": "3EB0C127D7BACC83D6A3",
+  "chat_id": "6289685028129@s.whatsapp.net",
+  "from": "6289685028129@s.whatsapp.net",
+  "pushname": "John Doe",
+  "image": {
+    "url": "https://mmg.whatsapp.net/...",
+    "caption": "hey akasha, what is this?",
+    "mime_type": "image/jpeg"
+  }
+}
+```
+
+**Processing Flow:**
+1. Receive webhook with `image` object (not a file path string)
+2. Extract `id` from payload for download
+3. Call `GET /message/{id}/download?phone={chat_id}` to fetch binary data
+4. Process image with LLM or other service
+5. No permanent storage required
 
 ### Signature Verification
 
@@ -351,6 +392,49 @@ async def handle_webhook(request: Request):
         print(f"Message from {payload['pushname']}: {payload['message']['text']}")
 
     return {"status": "ok"}
+```
+
+### Download Media On-Demand (Python)
+
+```python
+import httpx
+
+async def download_media(message_id: str, phone: str) -> tuple[bytes, str]:
+    """
+    Download media from a message on-demand.
+
+    Args:
+        message_id: The message ID containing media
+        phone: The phone/chat JID
+
+    Returns:
+        Tuple of (media_bytes, mime_type)
+    """
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"http://localhost:3000/message/{message_id}/download",
+            params={"phone": phone},
+            auth=("user1", "pass1"),
+            timeout=60.0
+        )
+        response.raise_for_status()
+
+        mime_type = response.headers.get("Content-Type", "application/octet-stream")
+        return response.content, mime_type
+
+# Usage in webhook handler
+async def handle_image_webhook(payload: dict):
+    image_info = payload.get("image")
+    if isinstance(image_info, dict):
+        message_id = payload.get("id")
+        chat_id = payload.get("chat_id")
+        caption = image_info.get("caption", "")
+
+        # Download image on-demand
+        image_bytes, mime_type = await download_media(message_id, chat_id)
+
+        # Process with your service (e.g., LLM vision)
+        print(f"Downloaded {len(image_bytes)} bytes of {mime_type}")
 ```
 
 ---
