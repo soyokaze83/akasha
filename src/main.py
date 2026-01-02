@@ -162,7 +162,9 @@ async def handle_webhook(request: Request) -> dict:
         logger.info(f"Webhook received: type={event_type}, from={sender} ({sender_jid})")
 
         # Debug: log full payload to understand structure
-        logger.debug(f"Full webhook payload: {payload}")
+        logger.info(f"Full webhook payload keys: {list(payload.keys())}")
+        if replied_id:
+            logger.info(f"Payload for reply message: {payload}")
 
         # Cache file_path for any incoming media (for later reply-to-image lookups)
         file_path = payload.get("file_path")
