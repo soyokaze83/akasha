@@ -216,8 +216,15 @@ async def handle_webhook(request: Request) -> dict:
                 quoted_image_mime = None
                 if replied_id:
                     # Use 'from' field for phone (not 'chat_id' which may be a LID)
+                    # Format: "6289608842518:40@s.whatsapp.net in 6289608842518@s.whatsapp.net"
+                    # We need "6289608842518@s.whatsapp.net" (the chat JID, not the device JID)
                     from_jid = payload.get("from") or sender_jid
-                    phone_for_download = from_jid.split(" in ")[0] if " in " in from_jid else from_jid
+                    # For "X in Y" format, use Y (the chat JID)
+                    if " in " in from_jid:
+                        phone_for_download = from_jid.split(" in ")[1]
+                    else:
+                        # Strip device ID if present (e.g., "6289608842518:40@s.whatsapp.net" -> "6289608842518@s.whatsapp.net")
+                        phone_for_download = from_jid.split(":")[0] + "@s.whatsapp.net" if ":" in from_jid and "@" in from_jid else from_jid
 
                     # GoWA may include file_path for quoted media directly in the webhook
                     quoted_file_path = payload.get("file_path")
@@ -368,7 +375,12 @@ async def handle_webhook(request: Request) -> dict:
 
                     # Fallback: try on-demand download API
                     if not image_bytes:
-                        phone_for_download = from_jid.split(" in ")[0] if " in " in from_jid else from_jid
+                        # For "X in Y" format, use Y (the chat JID)
+                        if " in " in from_jid:
+                            phone_for_download = from_jid.split(" in ")[1]
+                        else:
+                            # Strip device ID if present
+                            phone_for_download = from_jid.split(":")[0] + "@s.whatsapp.net" if ":" in from_jid and "@" in from_jid else from_jid
                         image_bytes, mime_type = await gowa_client.download_media(
                             message_id=payload_id,
                             phone=phone_for_download,
