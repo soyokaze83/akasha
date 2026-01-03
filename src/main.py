@@ -215,8 +215,9 @@ async def handle_webhook(request: Request) -> dict:
                 quoted_image_data = None
                 quoted_image_mime = None
                 if replied_id:
-                    chat_id = payload.get("chat_id") or sender_jid
-                    phone_for_download = chat_id.split(" in ")[0] if " in " in chat_id else chat_id
+                    # Use 'from' field for phone (not 'chat_id' which may be a LID)
+                    from_jid = payload.get("from") or sender_jid
+                    phone_for_download = from_jid.split(" in ")[0] if " in " in from_jid else from_jid
 
                     # GoWA may include file_path for quoted media directly in the webhook
                     quoted_file_path = payload.get("file_path")
@@ -324,7 +325,8 @@ async def handle_webhook(request: Request) -> dict:
             # Get image caption and message ID for download
             image_caption = image_info.get("caption", "")
             payload_id = payload.get("id", "")
-            chat_id = payload.get("chat_id") or sender_jid
+            # Use 'from' field for phone (not 'chat_id' which may be a LID)
+            from_jid = payload.get("from") or sender_jid
 
             # Check if replying to Akasha's message
             is_reply_to_akasha = replied_id and replied_id in akasha_message_ids
@@ -366,9 +368,10 @@ async def handle_webhook(request: Request) -> dict:
 
                     # Fallback: try on-demand download API
                     if not image_bytes:
+                        phone_for_download = from_jid.split(" in ")[0] if " in " in from_jid else from_jid
                         image_bytes, mime_type = await gowa_client.download_media(
                             message_id=payload_id,
-                            phone=chat_id.split(" in ")[0] if " in " in chat_id else chat_id,
+                            phone=phone_for_download,
                         )
 
                     # Use caption as query, or default to asking about the image
