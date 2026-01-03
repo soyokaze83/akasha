@@ -32,6 +32,10 @@ akasha_message_ids: dict[str, float] = {}
 # Key: message_id, Value: (file_path, timestamp)
 media_file_paths: dict[str, tuple[str, float]] = {}
 
+# In-memory set to track processed message IDs (prevent duplicate processing)
+# Key: message_id, Value: timestamp
+processed_message_ids: dict[str, float] = {}
+
 # Cleanup threshold: 24 hours
 MESSAGE_ID_TTL = 86400
 
@@ -51,6 +55,13 @@ def cleanup_old_message_ids() -> None:
         del media_file_paths[k]
     if expired_media:
         logger.debug(f"Cleaned up {len(expired_media)} old media file paths")
+
+    # Cleanup old processed message IDs
+    expired_processed = [k for k, v in processed_message_ids.items() if v < cutoff]
+    for k in expired_processed:
+        del processed_message_ids[k]
+    if expired_processed:
+        logger.debug(f"Cleaned up {len(expired_processed)} old processed message IDs")
 
 
 @asynccontextmanager
@@ -160,6 +171,20 @@ async def handle_webhook(request: Request) -> dict:
             event_type = "other"
 
         logger.info(f"Webhook received: type={event_type}, from={sender} ({sender_jid})")
+
+        # Skip if this is Akasha's own message (prevent self-replies)
+        if message_id and message_id in akasha_message_ids:
+            logger.debug(f"Skipping own message: {message_id}")
+            return {"status": "ok"}
+
+        # Skip if we've already processed this message (prevent duplicate processing)
+        if message_id and message_id in processed_message_ids:
+            logger.debug(f"Skipping already processed message: {message_id}")
+            return {"status": "ok"}
+
+        # Mark message as being processed
+        if message_id:
+            processed_message_ids[message_id] = time.time()
 
         # Debug: log full payload to understand structure
         logger.info(f"Full webhook payload keys: {list(payload.keys())}")
