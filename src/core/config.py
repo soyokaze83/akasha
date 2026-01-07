@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # Mandarin Generator - Recipients (comma-separated JIDs)
     whatsapp_recipients: str = ""
 
+    # Mandarin Generator - Topic Selection Mode
+    # Options: "free" (LLM freely chooses), "web_search" (use today's news)
+    topic_selection_mode: str = "free"
+
     # Scheduler Configuration
     daily_passage_hour: int = 7
     daily_passage_minute: int = 0
