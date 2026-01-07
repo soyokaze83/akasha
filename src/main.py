@@ -211,16 +211,6 @@ async def handle_webhook(request: Request) -> dict:
         else:
             event_type = "other"
 
-        # Determine event type from payload structure
-        if payload.get("reaction"):
-            event_type = "reaction"
-        elif has_image:
-            event_type = "message.image"
-        elif message_text:
-            event_type = "message.text"
-        else:
-            event_type = "other"
-
         logger.info(
             f"Webhook received: type={event_type}, from={sender} ({sender_jid})"
         )
@@ -235,9 +225,15 @@ async def handle_webhook(request: Request) -> dict:
             logger.debug(f"Skipping already processed message: {message_id}")
             return {"status": "ok"}
 
-        # Mark message as being processed
+        # Mark message as being processed IMMEDIATELY to prevent duplicate processing on timeout
         if message_id:
             processed_message_ids[message_id] = time.time()
+            logger.debug(f"Marked message {message_id} as processed")
+
+        # Skip if this is Akasha's own message (prevent self-replies)
+        if message_id and message_id in akasha_message_ids:
+            logger.debug(f"Skipping own message: {message_id}")
+            return {"status": "ok"}
 
         # Debug: log full payload to understand structure
         logger.info(f"Full webhook payload keys: {list(payload.keys())}")
@@ -383,6 +379,8 @@ async def handle_webhook(request: Request) -> dict:
                             )
 
                 try:
+                    processing_start = time.time()
+
                     response_text, sources = await reply_agent.process_query(
                         query=query,
                         quoted_context=quoted_context,
@@ -405,7 +403,11 @@ async def handle_webhook(request: Request) -> dict:
                     else:
                         logger.warning(f"No message_id in GoWA response: {result}")
 
-                    logger.info(f"Reply Agent response sent to {reply_jid}")
+                    total_time = time.time() - processing_start
+                    logger.info(
+                        f"Reply Agent response sent to {reply_jid} "
+                        f"(total processing time: {total_time:.2f}s)"
+                    )
 
                 except Exception as e:
                     logger.exception(f"Reply Agent error: {e}")
@@ -491,6 +493,8 @@ async def handle_webhook(request: Request) -> dict:
                     reply_jid = sender_jid.split(" in ")[1]
 
                 try:
+                    processing_start = time.time()
+
                     # Try to download image - first from cached file path, then via API
                     image_bytes = None
                     mime_type = None
@@ -561,7 +565,11 @@ async def handle_webhook(request: Request) -> dict:
                         akasha_message_ids[sent_message_id] = time.time()
                         logger.info(f"Tracked message ID: {sent_message_id}")
 
-                    logger.info(f"Reply Agent (image) response sent to {reply_jid}")
+                    total_time = time.time() - processing_start
+                    logger.info(
+                        f"Reply Agent (image) response sent to {reply_jid} "
+                        f"(total processing time: {total_time:.2f}s)"
+                    )
 
                 except Exception as e:
                     logger.exception(f"Reply Agent (image) error: {e}")

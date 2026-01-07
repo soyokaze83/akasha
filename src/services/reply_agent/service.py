@@ -157,7 +157,9 @@ User's question/comment: {query}"""
                 },
                 {"type": "text", "text": query},
             ]
-            logger.info(f"OpenAI processing multimodal query with image ({image_mime_type})")
+            logger.info(
+                f"OpenAI processing multimodal query with image ({image_mime_type})"
+            )
         else:
             user_content = query
 
@@ -173,6 +175,7 @@ User's question/comment: {query}"""
                 messages=messages,
                 tools=OPENAI_TOOLS,
                 tool_choice="auto",
+                timeout=45.0,
             )
 
             assistant_message = response.choices[0].message
@@ -191,11 +194,13 @@ User's question/comment: {query}"""
                         for result in search_results:
                             sources_used.append(result["link"])
 
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(search_results),
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(search_results),
+                            }
+                        )
             else:
                 return assistant_message.content or "", sources_used
 
@@ -203,6 +208,7 @@ User's question/comment: {query}"""
         response = await client.chat.completions.create(
             model=settings.openai_model,
             messages=messages,
+            timeout=45.0,
         )
         return response.choices[0].message.content or "", sources_used
 
@@ -245,13 +251,15 @@ User's question/comment: {query}"""
         # Build content parts - text only or multimodal with image
         parts: list[types.Part] = []
         if image_data and image_mime_type:
-            parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
-            logger.info(f"Gemini processing multimodal query with image ({image_mime_type})")
+            parts.append(
+                types.Part.from_bytes(data=image_data, mime_type=image_mime_type)
+            )
+            logger.info(
+                f"Gemini processing multimodal query with image ({image_mime_type})"
+            )
         parts.append(types.Part.from_text(text=query))
 
-        contents: list[types.Content] = [
-            types.Content(role="user", parts=parts)
-        ]
+        contents: list[types.Content] = [types.Content(role="user", parts=parts)]
 
         async def call_with_rotation(config: types.GenerateContentConfig):
             """Make Gemini API call with automatic key rotation on errors."""

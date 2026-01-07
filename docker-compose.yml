@@ -33,6 +33,7 @@ services:
       - APP_BASIC_AUTH=user1:pass1
       - WHATSAPP_WEBHOOK=http://akasha:8080/webhook
       - WHATSAPP_WEBHOOK_SECRET=${GOWA_WEBHOOK_SECRET:-your-secret-key}
+      - WHATSAPP_WEBHOOK_TIMEOUT=60
       - WHATSAPP_ACCOUNT_VALIDATION=true
       - whatsapp_auto_download_media=false
     networks:
