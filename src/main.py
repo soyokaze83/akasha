@@ -170,13 +170,30 @@ async def handle_webhook(request: Request) -> dict:
             ]
         )
 
-        # Unified message ID extraction - media messages have ID at top level, text messages inside message object
+        # Unified message ID extraction - try multiple locations for compatibility
+        # GoWA docs say media messages have ID at top level, but we also check message object
         if is_media_message:
-            message_id = payload.get("id", "")
             message_text = ""
             replied_id = payload.get("replied_id", "")
             quoted_message = payload.get("quoted_message", "")
             has_image = isinstance(image_info, dict)
+
+            # Try top-level ID first (for media messages), then fallback to message object
+            message_id = payload.get("id", "") or payload.get("message", {}).get(
+                "id", ""
+            )
+
+            # Log which location we found the ID in
+            if payload.get("id"):
+                logger.info(f"Found message_id at top level for media message")
+            elif payload.get("message", {}).get("id"):
+                logger.info(f"Found message_id in message object for media message")
+            else:
+                logger.warning(
+                    f"No message_id found in either top level or message object. "
+                    f"Payload keys: {list(payload.keys())}, "
+                    f"message keys: {list(payload.get('message', {}).keys())}"
+                )
         else:
             message_text = message_data.get("text", "")
             message_id = message_data.get("id", "")
@@ -439,7 +456,7 @@ async def handle_webhook(request: Request) -> dict:
         ):
             # Get image caption and message ID for download
             image_caption = image_info.get("caption", "")
-            payload_id = payload.get("id", "")
+            payload_id = message_id
             # Use 'from' field for phone (not 'chat_id' which may be a LID)
             from_jid = payload.get("from") or sender_jid
 
@@ -579,6 +596,15 @@ async def handle_webhook(request: Request) -> dict:
                     sent_message_id = error_result.get("message_id")
                     if sent_message_id:
                         akasha_message_ids[sent_message_id] = time.time()
+            else:
+                # Log why we're skipping processing
+                if should_process and not payload_id:
+                    logger.warning(
+                        f"Skipping image processing - no message_id available. "
+                        f"trigger_detected=True, message_id='{payload_id}', "
+                        f"payload id field='{payload.get('id', 'MISSING')}', "
+                        f"message.id='{payload.get('message', {}).get('id', 'MISSING')}'"
+                    )
 
     except Exception as e:
         logger.error(f"Failed to process webhook: {e}")
