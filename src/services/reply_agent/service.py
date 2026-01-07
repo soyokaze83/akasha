@@ -115,6 +115,14 @@ User's question/comment: {query}"""
                 or "api key expired" in error_str
                 or "invalid_argument" in error_str
                 or "invalid api key" in error_str
+                # SERVER OVERLOAD / UNAVAILABLE ERRORS
+                or "503" in str(e)
+                or "500" in error_str
+                or "unavailable" in error_str
+                or "overload" in error_str
+                or "overloaded" in error_str
+                or "internal error" in error_str
+                or "temporarily unavailable" in error_str
             )
 
             # If fallback is enabled and it's a fallback-worthy error, try fallback
@@ -296,13 +304,25 @@ User's question/comment: {query}"""
                     error_str = str(e).lower()
                     # Check if error warrants trying next key
                     is_rotatable_error = (
+                        # Rate limit / quota errors
                         "429" in str(e)
                         or "quota" in error_str
                         or "rate" in error_str
+                        or "exhausted" in error_str
+                        or "all api keys" in error_str
+                        # Invalid/expired API key errors
                         or "api_key_invalid" in error_str
                         or "api key expired" in error_str
                         or "invalid_argument" in error_str
                         or "invalid api key" in error_str
+                        # SERVER OVERLOAD / UNAVAILABLE ERRORS
+                        or "503" in str(e)
+                        or "500" in error_str
+                        or "unavailable" in error_str
+                        or "overload" in error_str
+                        or "overloaded" in error_str
+                        or "internal error" in error_str
+                        or "temporarily unavailable" in error_str
                     )
 
                     if is_rotatable_error:

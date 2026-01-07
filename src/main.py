@@ -414,7 +414,17 @@ async def handle_webhook(request: Request) -> dict:
 
                     # Determine user-friendly error message based on error type
                     error_str = str(e).lower()
-                    if "429" in str(e) or "quota" in error_str or "rate" in error_str:
+                    if (
+                        "503" in str(e)
+                        or "unavailable" in error_str
+                        or "overload" in error_str
+                    ):
+                        error_message = (
+                            "The AI service is temporarily overloaded. "
+                            "I tried all available API keys but couldn't connect. "
+                            "Please try again in a moment."
+                        )
+                    elif "429" in str(e) or "quota" in error_str or "rate" in error_str:
                         error_message = (
                             "I'm currently experiencing high demand and hit my rate limit. "
                             "Please wait a moment and try again."
@@ -580,6 +590,16 @@ async def handle_webhook(request: Request) -> dict:
                         error_message = (
                             "I couldn't download the image. "
                             "Please try sending it again."
+                        )
+                    elif (
+                        "503" in str(e)
+                        or "unavailable" in error_str
+                        or "overload" in error_str
+                    ):
+                        error_message = (
+                            "The AI service is temporarily overloaded. "
+                            "I tried all available API keys but couldn't connect. "
+                            "Please try again in a moment."
                         )
                     elif "429" in str(e) or "quota" in error_str or "rate" in error_str:
                         error_message = (

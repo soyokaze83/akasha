@@ -289,20 +289,24 @@ If changes to `.env` aren't reflected after restarting:
 docker-compose up --build -d
 ```
 
-### LLM rate limit errors (429)
-If you see `RESOURCE_EXHAUSTED` or rate limit errors:
+### LLM rate limit or server errors (429, 503)
+If you see rate limit or server unavailable errors:
 1. Enable automatic fallback (enabled by default):
    ```bash
    LLM_FALLBACK_ENABLED=true
    GEMINI_API_KEY=key1,key2,key3
    OPENAI_API_KEY=sk-your-key
    ```
-2. Or switch to a different LLM provider in `.env`:
+2. The system will:
+   - Rotate through all Gemini API keys on 503 errors
+   - Fallback to OpenAI if all Gemini keys are exhausted
+   - Provide clear error messages to users
+3. Or switch to a different LLM provider in `.env`:
    ```bash
    LLM_PROVIDER=openai
    OPENAI_API_KEY=sk-your-key
    ```
-3. Rebuild: `docker-compose up --build -d`
+4. Rebuild: `docker-compose up --build -d`
 
 ### Reply Agent not responding
 1. Check if enabled: `curl http://localhost:8080/reply-agent/status`
