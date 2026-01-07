@@ -134,12 +134,18 @@ async def handle_webhook(request: Request) -> dict:
     signature = request.headers.get("X-Hub-Signature-256", "")
 
     # Verify signature if secret is configured
-    if settings.gowa_webhook_secret and settings.gowa_webhook_secret != "your-secret-key":
-        expected = "sha256=" + hmac.new(
-            settings.gowa_webhook_secret.encode(),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
+    if (
+        settings.gowa_webhook_secret
+        and settings.gowa_webhook_secret != "your-secret-key"
+    ):
+        expected = (
+            "sha256="
+            + hmac.new(
+                settings.gowa_webhook_secret.encode(),
+                body,
+                hashlib.sha256,
+            ).hexdigest()
+        )
 
         if not hmac.compare_digest(signature, expected):
             logger.warning("Webhook signature verification failed")
@@ -151,14 +157,32 @@ async def handle_webhook(request: Request) -> dict:
         sender = payload.get("pushname", "unknown")
         sender_jid = payload.get("from", "")
         message_data = payload.get("message", {})
-        message_text = message_data.get("text", "")
-        message_id = message_data.get("id", "")
-        replied_id = message_data.get("replied_id", "")
-        quoted_message = message_data.get("quoted_message", "")
 
-        # Check for image message (with auto-download disabled, image is an object)
+        # Check for media messages (image/video/audio) - ID is at top level
         image_info = payload.get("image")
-        has_image = isinstance(image_info, dict)
+        video_info = payload.get("video")
+        audio_info = payload.get("audio")
+        is_media_message = any(
+            [
+                isinstance(image_info, dict),
+                isinstance(video_info, dict),
+                isinstance(audio_info, dict),
+            ]
+        )
+
+        # Unified message ID extraction - media messages have ID at top level, text messages inside message object
+        if is_media_message:
+            message_id = payload.get("id", "")
+            message_text = ""
+            replied_id = payload.get("replied_id", "")
+            quoted_message = payload.get("quoted_message", "")
+            has_image = isinstance(image_info, dict)
+        else:
+            message_text = message_data.get("text", "")
+            message_id = message_data.get("id", "")
+            replied_id = message_data.get("replied_id", "")
+            quoted_message = message_data.get("quoted_message", "")
+            has_image = False
 
         # Determine event type from payload structure
         if payload.get("reaction"):
@@ -170,7 +194,19 @@ async def handle_webhook(request: Request) -> dict:
         else:
             event_type = "other"
 
-        logger.info(f"Webhook received: type={event_type}, from={sender} ({sender_jid})")
+        # Determine event type from payload structure
+        if payload.get("reaction"):
+            event_type = "reaction"
+        elif has_image:
+            event_type = "message.image"
+        elif message_text:
+            event_type = "message.text"
+        else:
+            event_type = "other"
+
+        logger.info(
+            f"Webhook received: type={event_type}, from={sender} ({sender_jid})"
+        )
 
         # Skip if this is Akasha's own message (prevent self-replies)
         if message_id and message_id in akasha_message_ids:
@@ -196,21 +232,31 @@ async def handle_webhook(request: Request) -> dict:
         media_message_id = payload.get("id")
         if file_path and media_message_id:
             media_file_paths[media_message_id] = (file_path, time.time())
-            logger.info(f"Cached media file path for message {media_message_id}: {file_path}")
+            logger.info(
+                f"Cached media file path for message {media_message_id}: {file_path}"
+            )
 
         # Debug: log reply-related fields
         if replied_id or quoted_message:
-            logger.info(f"Reply context: replied_id={replied_id}, quoted_message={quoted_message[:50] if quoted_message else 'None'}...")
+            logger.info(
+                f"Reply context: replied_id={replied_id}, quoted_message={quoted_message[:50] if quoted_message else 'None'}..."
+            )
             logger.info(f"Tracked message IDs: {list(akasha_message_ids.keys())}")
 
         # Lazy cleanup of old message IDs
         cleanup_old_message_ids()
 
         # Handle Reply Agent triggers for text messages
-        if settings.reply_agent_enabled and event_type == "message.text" and message_text:
+        if (
+            settings.reply_agent_enabled
+            and event_type == "message.text"
+            and message_text
+        ):
             # Check if replying to Akasha's message (no prefix needed)
             is_reply_to_akasha = replied_id and replied_id in akasha_message_ids
-            logger.debug(f"Reply check: replied_id={replied_id}, is_reply_to_akasha={is_reply_to_akasha}")
+            logger.debug(
+                f"Reply check: replied_id={replied_id}, is_reply_to_akasha={is_reply_to_akasha}"
+            )
 
             # Determine if should trigger and extract query
             should_process = False
@@ -226,7 +272,9 @@ async def handle_webhook(request: Request) -> dict:
                 # Replying to Akasha without prefix - use full message as query
                 query = message_text
                 should_process = True
-                logger.info(f"Reply Agent triggered by reply to Akasha from {sender}: {query}")
+                logger.info(
+                    f"Reply Agent triggered by reply to Akasha from {sender}: {query}"
+                )
 
             if should_process:
                 # Extract reply JID - handle group messages
@@ -249,42 +297,73 @@ async def handle_webhook(request: Request) -> dict:
                         phone_for_download = from_jid.split(" in ")[1]
                     else:
                         # Strip device ID if present (e.g., "6289608842518:40@s.whatsapp.net" -> "6289608842518@s.whatsapp.net")
-                        phone_for_download = from_jid.split(":")[0] + "@s.whatsapp.net" if ":" in from_jid and "@" in from_jid else from_jid
+                        phone_for_download = (
+                            from_jid.split(":")[0] + "@s.whatsapp.net"
+                            if ":" in from_jid and "@" in from_jid
+                            else from_jid
+                        )
 
                     # GoWA may include file_path for quoted media directly in the webhook
                     quoted_file_path = payload.get("file_path")
                     if quoted_file_path:
-                        logger.info(f"Found file_path in webhook for quoted message: {quoted_file_path}")
+                        logger.info(
+                            f"Found file_path in webhook for quoted message: {quoted_file_path}"
+                        )
                         try:
-                            quoted_image_data, quoted_image_mime = await gowa_client.download_media_from_path(quoted_file_path)
-                            logger.info(f"Downloaded quoted image from webhook file_path: {quoted_image_mime}, {len(quoted_image_data)} bytes")
+                            (
+                                quoted_image_data,
+                                quoted_image_mime,
+                            ) = await gowa_client.download_media_from_path(
+                                quoted_file_path
+                            )
+                            logger.info(
+                                f"Downloaded quoted image from webhook file_path: {quoted_image_mime}, {len(quoted_image_data)} bytes"
+                            )
                         except Exception as e:
-                            logger.warning(f"Failed to download from webhook file_path {quoted_file_path}: {e}")
+                            logger.warning(
+                                f"Failed to download from webhook file_path {quoted_file_path}: {e}"
+                            )
 
                     # Try cached file path (from previous image webhooks)
                     if not quoted_image_data and replied_id in media_file_paths:
                         cached_path, _ = media_file_paths[replied_id]
                         try:
-                            quoted_image_data, quoted_image_mime = await gowa_client.download_media_from_path(cached_path)
-                            logger.info(f"Downloaded quoted image from cached path: {quoted_image_mime}, {len(quoted_image_data)} bytes")
+                            (
+                                quoted_image_data,
+                                quoted_image_mime,
+                            ) = await gowa_client.download_media_from_path(cached_path)
+                            logger.info(
+                                f"Downloaded quoted image from cached path: {quoted_image_mime}, {len(quoted_image_data)} bytes"
+                            )
                         except Exception as e:
-                            logger.warning(f"Failed to download from cached path {cached_path}: {e}")
+                            logger.warning(
+                                f"Failed to download from cached path {cached_path}: {e}"
+                            )
 
                     # Fallback: try on-demand download API (when auto-download is disabled)
                     if not quoted_image_data:
                         # Ensure phone has the right format (with @s.whatsapp.net suffix)
                         if not phone_for_download.endswith("@s.whatsapp.net"):
                             phone_for_download = f"{phone_for_download}@s.whatsapp.net"
-                        logger.info(f"Attempting download API with message_id={replied_id}, phone={phone_for_download}")
+                        logger.info(
+                            f"Attempting download API with message_id={replied_id}, phone={phone_for_download}"
+                        )
                         try:
-                            quoted_image_data, quoted_image_mime = await gowa_client.download_media(
+                            (
+                                quoted_image_data,
+                                quoted_image_mime,
+                            ) = await gowa_client.download_media(
                                 message_id=replied_id,
                                 phone=phone_for_download,
                             )
-                            logger.info(f"Downloaded quoted image via API: {quoted_image_mime}, {len(quoted_image_data)} bytes")
+                            logger.info(
+                                f"Downloaded quoted image via API: {quoted_image_mime}, {len(quoted_image_data)} bytes"
+                            )
                         except Exception as e:
                             # Log the actual error to understand why download failed
-                            logger.warning(f"Failed to download media for quoted message {replied_id}: {e}")
+                            logger.warning(
+                                f"Failed to download media for quoted message {replied_id}: {e}"
+                            )
 
                 try:
                     response_text, sources = await reply_agent.process_query(
@@ -353,7 +432,11 @@ async def handle_webhook(request: Request) -> dict:
                         akasha_message_ids[sent_message_id] = time.time()
 
         # Handle Reply Agent triggers for image messages
-        elif settings.reply_agent_enabled and event_type == "message.image" and image_info:
+        elif (
+            settings.reply_agent_enabled
+            and event_type == "message.image"
+            and image_info
+        ):
             # Get image caption and message ID for download
             image_caption = image_info.get("caption", "")
             payload_id = payload.get("id", "")
@@ -369,14 +452,20 @@ async def handle_webhook(request: Request) -> dict:
 
             if image_caption.lower().startswith(reply_agent.TRIGGER_PHRASE):
                 # "hey akasha, ..." in caption - extract query
-                query = image_caption[len(reply_agent.TRIGGER_PHRASE):].strip()
+                query = image_caption[len(reply_agent.TRIGGER_PHRASE) :].strip()
                 should_process = True
-                logger.info(f"Reply Agent (image) triggered by {sender}: {query}")
+                logger.info(
+                    f"Reply Agent (image) triggered by {sender}: query='{query}', "
+                    f"message_id={payload_id}, from_jid={from_jid}, "
+                    f"caption={image_caption[:100] if image_caption else '(empty)'}"
+                )
             elif is_reply_to_akasha:
                 # Replying to Akasha with an image - use caption or default prompt
                 query = image_caption.strip() if image_caption else ""
                 should_process = True
-                logger.info(f"Reply Agent (image) triggered by reply to Akasha from {sender}")
+                logger.info(
+                    f"Reply Agent (image) triggered by reply to Akasha from {sender}"
+                )
 
             if should_process and payload_id:
                 # Extract reply JID - handle group messages
@@ -393,22 +482,44 @@ async def handle_webhook(request: Request) -> dict:
                     if payload_id in media_file_paths:
                         cached_path, _ = media_file_paths[payload_id]
                         try:
-                            image_bytes, mime_type = await gowa_client.download_media_from_path(cached_path)
-                            logger.info(f"Downloaded image from cached path: {mime_type}, {len(image_bytes)} bytes")
+                            (
+                                image_bytes,
+                                mime_type,
+                            ) = await gowa_client.download_media_from_path(cached_path)
+                            logger.info(
+                                f"Downloaded image from cached path: {mime_type}, {len(image_bytes)} bytes"
+                            )
                         except Exception as e:
-                            logger.warning(f"Failed to download from cached path {cached_path}: {e}")
+                            logger.warning(
+                                f"Failed to download from cached path {cached_path}: {e}"
+                            )
 
                     # Fallback: try on-demand download API
                     if not image_bytes:
-                        # For "X in Y" format, use Y (the chat JID)
+                        # Normalize phone parameter for download API
                         if " in " in from_jid:
                             phone_for_download = from_jid.split(" in ")[1]
                         else:
                             # Strip device ID if present
-                            phone_for_download = from_jid.split(":")[0] + "@s.whatsapp.net" if ":" in from_jid and "@" in from_jid else from_jid
+                            phone_for_download = (
+                                from_jid.split(":")[0] + "@s.whatsapp.net"
+                                if ":" in from_jid and "@" in from_jid
+                                else from_jid
+                            )
+
+                        # Ensure phone has proper @s.whatsapp.net suffix
+                        if not phone_for_download.endswith("@s.whatsapp.net"):
+                            phone_for_download = f"{phone_for_download}@s.whatsapp.net"
+
+                        logger.info(
+                            f"Attempting image download via API: message_id={payload_id}, phone={phone_for_download}"
+                        )
                         image_bytes, mime_type = await gowa_client.download_media(
                             message_id=payload_id,
                             phone=phone_for_download,
+                        )
+                        logger.info(
+                            f"Image downloaded successfully: {mime_type}, {len(image_bytes)} bytes"
                         )
 
                     # Use caption as query, or default to asking about the image
@@ -457,8 +568,7 @@ async def handle_webhook(request: Request) -> dict:
                         )
                     else:
                         error_message = (
-                            "Sorry, I couldn't process the image. "
-                            "Please try again."
+                            "Sorry, I couldn't process the image. Please try again."
                         )
 
                     error_result = await gowa_client.send_message(
