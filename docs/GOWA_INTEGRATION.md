@@ -319,6 +319,19 @@ curl -u user1:pass1 http://localhost:3000/app/devices
 - No documented limits in GoWA itself
 - Recommended: Add delays between bulk messages
 
+### Webhook Timeout for Image Processing
+- **Default timeout**: 10 seconds (insufficient for images)
+- **Recommended**: 60 seconds minimum
+- **Reason**: LLM vision analysis typically takes 15-30+ seconds
+- **Configuration**: Set `WHATSAPP_WEBHOOK_TIMEOUT=60` in docker-compose.yml
+- **Impact**: Without sufficient timeout, GoWA will resend duplicate webhooks, causing duplicate processing attempts
+
+### Duplicate Webhook Handling
+- GoWA retries webhooks on timeout
+- Always mark messages as processed **immediately** after ID extraction
+- Use in-memory cache to skip duplicate processing
+- Example: `processed_messages[message_id] = time.time()`
+
 ### Terms of Service
 - Automated messaging via WhatsApp Web may violate WhatsApp's ToS
 - Use with awareness of potential account restrictions
@@ -368,8 +381,12 @@ async def send_whatsapp_message(phone: str, message: str):
 from fastapi import APIRouter, Request, HTTPException
 import hmac
 import hashlib
+import time
 
 router = APIRouter()
+
+# In-memory cache to prevent duplicate processing
+processed_messages: dict[str, float] = {}
 
 @router.post("/webhook")
 async def handle_webhook(request: Request):
@@ -387,9 +404,35 @@ async def handle_webhook(request: Request):
 
     payload = await request.json()
 
+    # Unified message ID extraction - check both locations
+    # Media messages have ID at top level, text messages inside message object
+    image_info = payload.get("image")
+    video_info = payload.get("video")
+    audio_info = payload.get("audio")
+    is_media_message = any([isinstance(image_info, dict), 
+                           isinstance(video_info, dict), 
+                           isinstance(audio_info, dict)])
+    
+    if is_media_message:
+        message_id = payload.get("id") or payload.get("message", {}).get("id", "")
+    else:
+        message_id = payload.get("message", {}).get("id", "")
+
+    # Skip duplicates immediately after ID extraction
+    if message_id and message_id in processed_messages:
+        logger.debug(f"Skipping already processed message: {message_id}")
+        return {"status": "ok"}
+
+    # Mark as processed to prevent retry duplicates
+    if message_id:
+        processed_messages[message_id] = time.time()
+
     # Process based on event type
     if payload.get("type") == "message.text":
-        print(f"Message from {payload['pushname']}: {payload['message']['text']}")
+        message_text = payload.get("message", {}).get("text", "")
+        logger.info(f"Message from {payload['pushname']}: {message_text}")
+    elif payload.get("image"):
+        logger.info(f"Image received from {payload['pushname']}")
 
     return {"status": "ok"}
 ```
@@ -415,7 +458,7 @@ async def download_media(message_id: str, phone: str) -> tuple[bytes, str]:
             f"http://localhost:3000/message/{message_id}/download",
             params={"phone": phone},
             auth=("user1", "pass1"),
-            timeout=60.0
+            timeout=60.0,  # 60s timeout for large files/slow connections
         )
         response.raise_for_status()
 
@@ -436,6 +479,113 @@ async def handle_image_webhook(payload: dict):
         # Process with your service (e.g., LLM vision)
         print(f"Downloaded {len(image_bytes)} bytes of {mime_type}")
 ```
+
+---
+
+## Troubleshooting
+
+### Image Not Responding
+
+**Symptoms:**
+- Image sent with caption "hey akasha, ..." receives no response
+- Logs show webhook received but no LLM processing
+- Duplicate webhook messages appearing in logs
+
+**Common Causes:**
+
+1. **Message ID extraction failed**
+   - Logs show: `message_id=` (empty string)
+   - Cause: Payload structure mismatch, ID in unexpected location
+
+2. **Webhook timeout before LLM completes**
+   - Logs show: `context deadline exceeded` or GoWA retry attempts
+   - Cause: Default 10s timeout insufficient for image processing
+
+3. **Duplicate webhook processing**
+   - Logs show: Multiple webhooks with same message_id
+   - Cause: Message not marked processed immediately after extraction
+
+**Solutions:**
+
+1. Verify webhook timeout configuration:
+   ```yaml
+   # docker-compose.yml
+   environment:
+     - WHATSAPP_WEBHOOK_TIMEOUT=60  # Minimum 60s for images
+   ```
+
+2. Check for successful message ID extraction:
+   - Look for: `Found message_id in message object for media message`
+   - Or: `Found message_id at top level for media message`
+   - If missing, payload structure needs investigation
+
+3. Ensure immediate message marking:
+   - Messages should be marked processed immediately after ID extraction
+   - Look for: `Marked message {message_id} as processed`
+   - This prevents duplicate processing on webhook retries
+
+4. Verify LLM API timeouts:
+   - OpenAI: `timeout=45.0` in chat.completions.create()
+   - Gemini: Set appropriate timeout in generate_content()
+
+**Expected Logging Patterns:**
+
+When image processing works correctly, you should see these log entries in order:
+
+1. Message ID extraction:
+   ```
+   Found message_id in message object for media message
+   ```
+   OR
+   ```
+   Found message_id at top level for media message
+   ```
+
+2. Trigger detection:
+   ```
+   Reply Agent (image) triggered by {sender}: query='...', 
+   message_id=3EB0B14F97D0CD32235B0C, 
+   from_jid=6289608842518:40@s.whatsapp.net in 6289608842518@s.whatsapp.net, 
+   caption=hey akasha, what is this...
+   ```
+
+3. Download attempt:
+   ```
+   Attempting image download via API: message_id=3EB0B14F97D0CD32235B0C, 
+   phone=6289608842518@s.whatsapp.net
+   ```
+
+4. Download success:
+   ```
+   Image downloaded successfully: image/jpeg, 41291 bytes
+   ```
+
+5. LLM processing:
+   ```
+   Gemini processing multimodal query with image (image/jpeg)
+   ```
+   OR
+   ```
+   OpenAI processing multimodal query with image (image/jpeg)
+   ```
+
+6. Response sent:
+   ```
+   Reply Agent (image) response sent to 6289608842518@s.whatsapp.net 
+   (total processing time: 16.23s)
+   ```
+
+**Diagnosis Checklist:**
+
+If images aren't responding, verify the following logs appear:
+
+- [ ] Message ID found (not empty)
+- [ ] Trigger detected (not skipping due to duplicate)
+- [ ] Download attempted (not failing at API call)
+- [ ] Download successful (not media download error)
+- [ ] LLM processing started (not hanging)
+- [ ] Response sent (not error thrown)
+- [ ] Total time under 60s (not webhook timeout)
 
 ---
 
