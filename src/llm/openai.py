@@ -24,7 +24,9 @@ class OpenAIClient:
         if self._client is None:
             if not self.api_key:
                 raise ValueError("OPENAI_API_KEY is not configured")
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            self._client = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1", api_key=self.api_key
+            )
         return self._client
 
     async def generate_content(

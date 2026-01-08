@@ -6,7 +6,7 @@ import logging
 from typing import Optional
 
 from src.core.config import settings
-from src.services.reply_agent.tools import web_search_tool, OPENAI_TOOLS
+from src.services.reply_agent.tools import OPENAI_TOOLS, web_search_tool
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,9 @@ User's question/comment: {query}"""
         """Process query using OpenAI with function calling and optional image."""
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        client = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1", api_key=settings.openai_api_key
+        )
 
         # Build user content - either simple text or multimodal with image
         if image_data and image_mime_type:
