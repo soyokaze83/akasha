@@ -9,6 +9,7 @@ from tenacity import (
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
+    wait_fixed,
 )
 
 from src.core.config import settings
@@ -118,6 +119,11 @@ class GowaClient:
             data = response.json()
             return data.get("results", [])
 
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(1),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
+    )
     async def download_media(self, message_id: str, phone: str) -> tuple[bytes, str]:
         """
         Download media from a message on-demand.
@@ -172,6 +178,11 @@ class GowaClient:
             logger.info(f"Downloaded media from message {message_id}: {mime_type}, {len(response.content)} bytes")
             return response.content, mime_type
 
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(1),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
+    )
     async def download_media_from_path(self, file_path: str) -> tuple[bytes, str]:
         """
         Download media from a static file path (when auto-download is enabled).

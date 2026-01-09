@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     daily_passage_minute: int = 0
     timezone: str = "Asia/Jakarta"
 
+    # Rate Limiting Configuration
+    rate_limit_requests: int = 10  # Max requests per sender per window
+    rate_limit_window_seconds: int = 60  # Window size in seconds
+
+    # Concurrency Configuration
+    max_concurrent_sends: int = 5  # Max parallel message sends
+
     @property
     def recipients_list(self) -> list[str]:
         """Parse comma-separated recipients into list."""

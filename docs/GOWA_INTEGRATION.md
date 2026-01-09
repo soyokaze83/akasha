@@ -180,6 +180,35 @@ Examples:
 ```
 Example: `120363024512399999@g.us`
 
+### Group Message Sender Format
+
+When receiving messages from groups, the `from` field has a compound format:
+```
+{phone}:{device_id}@s.whatsapp.net in {group_id}@g.us
+```
+
+Example: `6289685028129:40@s.whatsapp.net in 120363024512399999@g.us`
+
+**Parsing Logic:**
+1. Split by ` in ` to separate sender from group
+2. Use the group part for reply JID (to reply in the group)
+3. Strip device ID (`:XX`) from sender for download API calls
+
+```python
+from_jid = "6289608842518:40@s.whatsapp.net in 6289608842518@s.whatsapp.net"
+
+# For group messages, reply to the group
+if " in " in from_jid:
+    reply_jid = from_jid.split(" in ")[1]  # Group JID
+    sender_jid = from_jid.split(" in ")[0]  # Individual sender
+else:
+    reply_jid = from_jid
+    sender_jid = from_jid
+
+# For download API, strip device ID
+phone_for_download = sender_jid.split(":")[0] + "@s.whatsapp.net"
+```
+
 ### How to Get Group JID
 1. Call `GET /user/my/groups` to list all groups
 2. Find the group and use the `id` field
@@ -214,6 +243,25 @@ Every webhook includes these common fields:
 }
 ```
 
+### Event Type Detection
+
+**Note:** The `type` field may not always be present or reliable. Akasha determines event type by checking payload structure:
+- `reaction` field present → reaction event
+- `image` field is dict → image message
+- `message.text` exists → text message
+
+```python
+# Determine event type from payload structure
+if payload.get("reaction"):
+    event_type = "reaction"
+elif isinstance(payload.get("image"), dict):
+    event_type = "message.image"
+elif payload.get("message", {}).get("text"):
+    event_type = "message.text"
+else:
+    event_type = "other"
+```
+
 ### Event Types
 
 | Type | Description | Additional Fields |
@@ -226,6 +274,43 @@ Every webhook includes these common fields:
 | `message.reaction` | Reaction to message | `reaction`, `message_id_reacted` |
 | `message.revoked` | Message deleted | `message_id` |
 | `group.participants` | Group membership change | `action`, `participants` |
+
+### Reply Message Fields
+
+When a user replies to a message, additional fields are included in the webhook payload:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `replied_id` | string | Message ID being replied to |
+| `quoted_message` | string | Text content of the quoted message |
+| `file_path` | string | Path to auto-downloaded media (if enabled) |
+
+**Example Reply Payload:**
+```json
+{
+  "id": "3EB0C127D7BACC83D6A3",
+  "from": "6289685028129@s.whatsapp.net",
+  "message": {
+    "id": "3EB0C127D7BACC83D6A3",
+    "text": "Thanks for the info!",
+    "replied_id": "3EB0B430B6F8F1D0E053",
+    "quoted_message": "Here is the information you requested..."
+  },
+  "pushname": "John Doe"
+}
+```
+
+**Detecting Replies:**
+```python
+message_data = payload.get("message", {})
+replied_id = message_data.get("replied_id", "")
+quoted_message = message_data.get("quoted_message", "")
+
+if replied_id:
+    # This is a reply to another message
+    # Check if it's a reply to our bot's message
+    is_reply_to_bot = replied_id in bot_message_ids
+```
 
 ### Image Message Webhook (Auto-Download Disabled)
 

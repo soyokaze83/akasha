@@ -9,19 +9,24 @@ Mostly for my personal needs but feel free to setup for personal usage as well.
 ### Mandarin Generator
 Daily HSK 3-4 level Mandarin reading passages sent automatically via WhatsApp. Perfect for language learners practicing with friends.
 
-- Generates 150-250 character passages using LLMs (Gemini or OpenAI)
+- Generates 300-500 character passages using LLMs (Gemini or OpenAI)
 - Hanzi only format (no pinyin, no English)
 - Automatic daily scheduling with configurable time
 - Manual trigger via API
+- Web search mode for current event topics
+- Parallel sending to multiple recipients with idempotency tracking
 
 ### Reply Agent
 AI-powered WhatsApp assistant that responds to messages with web search capabilities.
 
 - Trigger with "hey akasha, <your question>" in any chat
 - Reply directly to Akasha's messages without trigger phrase to continue conversation
+- Image understanding - send images with captions for visual analysis
 - Web search integration for current information
 - Automatic LLM provider fallback (Gemini ↔ OpenAI) on rate limits
 - Supports multiple rotating API keys for high availability
+- Background processing prevents webhook timeouts
+- Rate limiting per sender to prevent abuse
 
 ### Chat Summarizer (Coming Soon)
 Summarize WhatsApp chat history using LLMs.
@@ -98,9 +103,13 @@ Summarize WhatsApp chat history using LLMs.
 | `GOOGLE_SEARCH_API_KEY` | For Reply Agent | - | Google Custom Search API key |
 | `GOOGLE_SEARCH_ENGINE_ID` | For Reply Agent | - | Google Custom Search Engine ID |
 | `WHATSAPP_RECIPIENTS` | Yes | - | Comma-separated recipient JIDs |
+| `TOPIC_SELECTION_MODE` | No | `free` | Topic mode: `free` or `web_search` |
 | `DAILY_PASSAGE_HOUR` | No | `7` | Hour to send (0-23) |
 | `DAILY_PASSAGE_MINUTE` | No | `0` | Minute to send (0-59) |
 | `TIMEZONE` | No | `Asia/Jakarta` | Scheduler timezone |
+| `RATE_LIMIT_REQUESTS` | No | `10` | Max requests per sender per window |
+| `RATE_LIMIT_WINDOW_SECONDS` | No | `60` | Rate limit window in seconds |
+| `MAX_CONCURRENT_SENDS` | No | `5` | Max parallel message sends |
 | `GOWA_BASE_URL` | No | `http://whatsapp:3000` | GoWA service URL |
 | `GOWA_USERNAME` | No | `user1` | GoWA basic auth username |
 | `GOWA_PASSWORD` | No | `pass1` | GoWA basic auth password |
@@ -177,7 +186,9 @@ akasha/
 │   ├── core/                     # Shared utilities
 │   │   ├── config.py             # Pydantic settings
 │   │   ├── logging.py            # Logging setup
-│   │   ├── scheduler.py          # APScheduler
+│   │   ├── scheduler.py          # APScheduler + cache cleanup
+│   │   ├── rate_limiter.py       # Per-sender rate limiting
+│   │   ├── background_tasks.py   # Async webhook processing
 │   │   └── gowa/                 # GoWA client
 │   ├── llm/
 │   │   ├── base.py               # LLM provider abstraction
@@ -316,6 +327,22 @@ If you see rate limit or server unavailable errors:
    GOOGLE_SEARCH_API_KEY=your-key
    GOOGLE_SEARCH_ENGINE_ID=your-cx-id
    ```
+
+### Rate limit exceeded (429 error)
+The webhook endpoint has rate limiting to prevent abuse:
+- Default: 10 requests per minute per sender
+- Configure via `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS`
+- Legitimate users rarely hit this limit
+
+### Image messages not being processed
+1. Ensure webhook timeout is sufficient (60s minimum):
+   ```yaml
+   # docker-compose.yml
+   environment:
+     - WHATSAPP_WEBHOOK_TIMEOUT=60
+   ```
+2. Check logs for download errors - media download has automatic retry
+3. Verify the image caption starts with "hey akasha, " or is a reply to Akasha's message
 
 ## License
 

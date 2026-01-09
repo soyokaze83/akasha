@@ -6,7 +6,8 @@
       "Bash(uv run python:*)",
       "Bash(uv pip install:*)",
       "Bash(cd:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(dir:*)"
     ]
   }
 }

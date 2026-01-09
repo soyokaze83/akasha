@@ -3,6 +3,7 @@
 FastAPI application entry point with lifespan management.
 """
 
+import asyncio
 import hmac
 import hashlib
 import logging
@@ -17,6 +18,11 @@ from src.core.config import settings
 from src.core.logging import setup_logging
 from src.core.scheduler import start_scheduler, shutdown_scheduler, scheduler
 from src.core.gowa import gowa_client
+from src.core.rate_limiter import rate_limiter
+from src.core.background_tasks import (
+    process_text_reply_background,
+    process_image_reply_background,
+)
 from src.services.mandarin_generator import router as mandarin_router
 from src.services.reply_agent import reply_agent, router as reply_agent_router
 
@@ -156,6 +162,11 @@ async def handle_webhook(request: Request) -> dict:
 
         sender = payload.get("pushname", "unknown")
         sender_jid = payload.get("from", "")
+
+        # Rate limit check - prevent DoS attacks
+        if sender_jid and not await rate_limiter.is_allowed(sender_jid):
+            logger.warning(f"Rate limit exceeded for {sender_jid}")
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
         message_data = payload.get("message", {})
 
         # Check for media messages (image/video/audio) - ID is at top level
@@ -230,15 +241,8 @@ async def handle_webhook(request: Request) -> dict:
             processed_message_ids[message_id] = time.time()
             logger.debug(f"Marked message {message_id} as processed")
 
-        # Skip if this is Akasha's own message (prevent self-replies)
-        if message_id and message_id in akasha_message_ids:
-            logger.debug(f"Skipping own message: {message_id}")
-            return {"status": "ok"}
-
-        # Debug: log full payload to understand structure
-        logger.info(f"Full webhook payload keys: {list(payload.keys())}")
-        if replied_id:
-            logger.info(f"Payload for reply message: {payload}")
+        # Debug: log payload structure (not content to avoid PII)
+        logger.debug(f"Webhook payload keys: {list(payload.keys())}")
 
         # Cache file_path for any incoming media (for later reply-to-image lookups)
         file_path = payload.get("file_path")
@@ -249,12 +253,12 @@ async def handle_webhook(request: Request) -> dict:
                 f"Cached media file path for message {media_message_id}: {file_path}"
             )
 
-        # Debug: log reply-related fields
+        # Debug: log reply context (truncated to avoid PII)
         if replied_id or quoted_message:
-            logger.info(
-                f"Reply context: replied_id={replied_id}, quoted_message={quoted_message[:50] if quoted_message else 'None'}..."
+            logger.debug(
+                f"Reply context: replied_id={replied_id}, "
+                f"has_quoted_message={bool(quoted_message)}"
             )
-            logger.info(f"Tracked message IDs: {list(akasha_message_ids.keys())}")
 
         # Lazy cleanup of old message IDs
         cleanup_old_message_ids()
@@ -378,87 +382,21 @@ async def handle_webhook(request: Request) -> dict:
                                 f"Failed to download media for quoted message {replied_id}: {e}"
                             )
 
-                try:
-                    processing_start = time.time()
-
-                    response_text, sources = await reply_agent.process_query(
+                # Process in background to avoid blocking webhook handler
+                # This allows GoWA to receive 200 OK within timeout while LLM processes
+                asyncio.create_task(
+                    process_text_reply_background(
+                        reply_agent=reply_agent,
                         query=query,
+                        reply_jid=reply_jid,
+                        message_id=message_id,
                         quoted_context=quoted_context,
                         image_data=quoted_image_data,
                         image_mime_type=quoted_image_mime,
+                        akasha_message_ids=akasha_message_ids,
                     )
-
-                    result = await gowa_client.send_message(
-                        phone=reply_jid,
-                        message=response_text,
-                        reply_message_id=message_id,
-                    )
-
-                    # Track Akasha's sent message ID for reply detection
-                    # GoWA returns message_id at top level, not nested
-                    sent_message_id = result.get("message_id")
-                    if sent_message_id:
-                        akasha_message_ids[sent_message_id] = time.time()
-                        logger.info(f"Tracked message ID: {sent_message_id}")
-                    else:
-                        logger.warning(f"No message_id in GoWA response: {result}")
-
-                    total_time = time.time() - processing_start
-                    logger.info(
-                        f"Reply Agent response sent to {reply_jid} "
-                        f"(total processing time: {total_time:.2f}s)"
-                    )
-
-                except Exception as e:
-                    logger.exception(f"Reply Agent error: {e}")
-
-                    # Determine user-friendly error message based on error type
-                    error_str = str(e).lower()
-                    if (
-                        "503" in str(e)
-                        or "unavailable" in error_str
-                        or "overload" in error_str
-                    ):
-                        error_message = (
-                            "The AI service is temporarily overloaded. "
-                            "I tried all available API keys but couldn't connect. "
-                            "Please try again in a moment."
-                        )
-                    elif "429" in str(e) or "quota" in error_str or "rate" in error_str:
-                        error_message = (
-                            "I'm currently experiencing high demand and hit my rate limit. "
-                            "Please wait a moment and try again."
-                        )
-                    elif "exhausted" in error_str or "all api keys" in error_str:
-                        error_message = (
-                            "All my API resources are temporarily exhausted. "
-                            "Please try again in a few minutes."
-                        )
-                    elif "timeout" in error_str:
-                        error_message = (
-                            "The request took too long to process. "
-                            "Please try again with a simpler question."
-                        )
-                    elif "api" in error_str and "key" in error_str:
-                        error_message = (
-                            "I'm having trouble connecting to my AI service. "
-                            "Please notify the administrator."
-                        )
-                    else:
-                        error_message = (
-                            "Sorry, I encountered an error processing your request. "
-                            "Please try again."
-                        )
-
-                    error_result = await gowa_client.send_message(
-                        phone=reply_jid,
-                        message=error_message,
-                        reply_message_id=message_id,
-                    )
-                    # Also track error message IDs so user can reply to them
-                    sent_message_id = error_result.get("message_id")
-                    if sent_message_id:
-                        akasha_message_ids[sent_message_id] = time.time()
+                )
+                logger.info(f"Text reply queued for background processing: {query[:50]}...")
 
         # Handle Reply Agent triggers for image messages
         elif (
@@ -502,13 +440,13 @@ async def handle_webhook(request: Request) -> dict:
                 if " in " in sender_jid:
                     reply_jid = sender_jid.split(" in ")[1]
 
+                # Download image first (must complete before background processing)
+                # Try cached file path first, then on-demand API
+                image_bytes = None
+                mime_type = None
+                download_error = None
+
                 try:
-                    processing_start = time.time()
-
-                    # Try to download image - first from cached file path, then via API
-                    image_bytes = None
-                    mime_type = None
-
                     # Try cached file path first (when GoWA auto-downloads)
                     if payload_id in media_file_paths:
                         cached_path, _ = media_file_paths[payload_id]
@@ -552,78 +490,49 @@ async def handle_webhook(request: Request) -> dict:
                         logger.info(
                             f"Image downloaded successfully: {mime_type}, {len(image_bytes)} bytes"
                         )
+                except Exception as e:
+                    download_error = e
+                    logger.exception(f"Failed to download image: {e}")
 
+                if download_error or not image_bytes:
+                    # Send error message for download failure
+                    error_message = (
+                        "I couldn't download the image. "
+                        "Please try sending it again."
+                    )
+                    try:
+                        error_result = await gowa_client.send_message(
+                            phone=reply_jid,
+                            message=error_message,
+                            reply_message_id=payload_id,
+                        )
+                        sent_message_id = error_result.get("message_id")
+                        if sent_message_id:
+                            akasha_message_ids[sent_message_id] = time.time()
+                    except Exception as send_error:
+                        logger.error(f"Failed to send download error message: {send_error}")
+                else:
                     # Use caption as query, or default to asking about the image
                     if not query:
                         query = "What is in this image?"
 
-                    response_text, sources = await reply_agent.process_query(
-                        query=query,
-                        image_data=image_bytes,
-                        image_mime_type=mime_type,
+                    # Get quoted context for image replies
+                    quoted_context = quoted_message if quoted_message else None
+
+                    # Process in background to avoid blocking webhook handler
+                    asyncio.create_task(
+                        process_image_reply_background(
+                            reply_agent=reply_agent,
+                            query=query,
+                            reply_jid=reply_jid,
+                            message_id=payload_id,
+                            image_data=image_bytes,
+                            image_mime_type=mime_type,
+                            quoted_context=quoted_context,
+                            akasha_message_ids=akasha_message_ids,
+                        )
                     )
-
-                    result = await gowa_client.send_message(
-                        phone=reply_jid,
-                        message=response_text,
-                        reply_message_id=payload_id,
-                    )
-
-                    # Track Akasha's sent message ID
-                    sent_message_id = result.get("message_id")
-                    if sent_message_id:
-                        akasha_message_ids[sent_message_id] = time.time()
-                        logger.info(f"Tracked message ID: {sent_message_id}")
-
-                    total_time = time.time() - processing_start
-                    logger.info(
-                        f"Reply Agent (image) response sent to {reply_jid} "
-                        f"(total processing time: {total_time:.2f}s)"
-                    )
-
-                except Exception as e:
-                    logger.exception(f"Reply Agent (image) error: {e}")
-
-                    # User-friendly error message
-                    error_str = str(e).lower()
-                    if "download" in error_str or "media" in error_str:
-                        error_message = (
-                            "I couldn't download the image. "
-                            "Please try sending it again."
-                        )
-                    elif (
-                        "503" in str(e)
-                        or "unavailable" in error_str
-                        or "overload" in error_str
-                    ):
-                        error_message = (
-                            "The AI service is temporarily overloaded. "
-                            "I tried all available API keys but couldn't connect. "
-                            "Please try again in a moment."
-                        )
-                    elif "429" in str(e) or "quota" in error_str or "rate" in error_str:
-                        error_message = (
-                            "I'm currently experiencing high demand. "
-                            "Please wait a moment and try again."
-                        )
-                    elif "exhausted" in error_str or "all api keys" in error_str:
-                        error_message = (
-                            "All my API resources are temporarily exhausted. "
-                            "Please try again in a few minutes."
-                        )
-                    else:
-                        error_message = (
-                            "Sorry, I couldn't process the image. Please try again."
-                        )
-
-                    error_result = await gowa_client.send_message(
-                        phone=reply_jid,
-                        message=error_message,
-                        reply_message_id=payload_id,
-                    )
-                    sent_message_id = error_result.get("message_id")
-                    if sent_message_id:
-                        akasha_message_ids[sent_message_id] = time.time()
+                    logger.info(f"Image reply queued for background processing: {query[:50]}...")
             else:
                 # Log why we're skipping processing
                 if should_process and not payload_id:
