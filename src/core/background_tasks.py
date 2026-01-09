@@ -228,3 +228,67 @@ async def _send_image_error_response(
             akasha_message_ids[sent_message_id] = time.time()
     except Exception as send_error:
         logger.error(f"Failed to send error message: {send_error}")
+
+
+async def process_chat_summary_background(
+    chat_summarizer_service,
+    chat_jid: str,
+    message_count: int,
+    reply_jid: str,
+    message_id: str,
+    akasha_message_ids: dict[str, float],
+) -> None:
+    """
+    Process chat summary in background and send response.
+
+    Args:
+        chat_summarizer_service: The ChatSummarizerService instance
+        chat_jid: JID of the chat to summarize
+        message_count: Number of messages to summarize
+        reply_jid: JID to send the response to
+        message_id: Original message ID (for reply threading)
+        akasha_message_ids: Dict to track Akasha's sent messages
+    """
+    start_time = time.time()
+
+    try:
+        # Fetch messages from GoWA
+        messages = await gowa_client.get_chat_messages(
+            chat_jid=chat_jid,
+            limit=message_count,
+        )
+
+        if not messages:
+            response_text = "I couldn't find any messages to summarize in this chat."
+        else:
+            # Generate summary
+            summary, participants = await chat_summarizer_service.summarize_messages(
+                messages
+            )
+
+            # Format response
+            response_text = f"*Chat Summary* ({len(messages)} messages)\n\n{summary}"
+            if participants:
+                response_text += f"\n\n*Participants:* {', '.join(sorted(participants))}"
+
+        # Send response
+        result = await gowa_client.send_message(
+            phone=reply_jid,
+            message=response_text,
+            reply_message_id=message_id,
+        )
+
+        # Track message ID for reply detection
+        sent_message_id = result.get("message_id")
+        if sent_message_id:
+            akasha_message_ids[sent_message_id] = time.time()
+
+        elapsed = time.time() - start_time
+        logger.info(
+            f"Chat summary sent to {reply_jid} "
+            f"({len(messages)} messages, {elapsed:.2f}s)"
+        )
+
+    except Exception as e:
+        logger.exception(f"Error processing chat summary: {e}")
+        await _send_error_response(e, reply_jid, message_id, akasha_message_ids)

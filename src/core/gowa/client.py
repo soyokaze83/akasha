@@ -213,6 +213,42 @@ class GowaClient:
             logger.info(f"Downloaded media from path {file_path}: {mime_type}, {len(response.content)} bytes")
             return response.content, mime_type
 
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(1),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
+    )
+    async def get_chat_messages(
+        self, chat_jid: str, limit: int = 50
+    ) -> list[dict]:
+        """
+        Fetch message history from a specific chat.
+
+        Args:
+            chat_jid: The chat JID (individual or group)
+            limit: Maximum number of messages to fetch
+
+        Returns:
+            List of message dicts with sender, text, timestamp
+
+        Raises:
+            GowaClientError: If fetch fails
+        """
+        async with self._get_client() as client:
+            response = await client.get(
+                f"/chat/{chat_jid}/messages",
+                params={"limit": limit},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("code") != "SUCCESS":
+                raise GowaClientError(f"Failed to fetch messages: {data}")
+
+            messages = data.get("results", [])
+            logger.info(f"Fetched {len(messages)} messages from {chat_jid}")
+            return messages
+
 
 # Singleton instance for dependency injection
 gowa_client = GowaClient()

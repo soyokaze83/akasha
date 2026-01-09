@@ -22,9 +22,11 @@ from src.core.rate_limiter import rate_limiter
 from src.core.background_tasks import (
     process_text_reply_background,
     process_image_reply_background,
+    process_chat_summary_background,
 )
 from src.services.mandarin_generator import router as mandarin_router
 from src.services.reply_agent import reply_agent, router as reply_agent_router
+from src.services.chat_summarizer import chat_summarizer, router as chat_summarizer_router
 
 # Setup logging first
 setup_logging()
@@ -92,6 +94,7 @@ app = FastAPI(
 # Include service routers
 app.include_router(mandarin_router)
 app.include_router(reply_agent_router)
+app.include_router(chat_summarizer_router)
 
 
 # Health check models
@@ -110,7 +113,7 @@ async def root() -> dict:
         "name": settings.app_name,
         "version": "0.1.0",
         "description": "Multi-Service WhatsApp Platform",
-        "services": ["mandarin_generator", "reply_agent"],
+        "services": ["mandarin_generator", "reply_agent", "chat_summarizer"],
     }
 
 
@@ -397,6 +400,41 @@ async def handle_webhook(request: Request) -> dict:
                     )
                 )
                 logger.info(f"Text reply queued for background processing: {query[:50]}...")
+
+        # Handle Chat Summarizer triggers for text messages
+        if (
+            settings.chat_summarizer_enabled
+            and event_type == "message.text"
+            and message_text
+            and chat_summarizer.should_trigger(message_text)
+        ):
+            message_count = chat_summarizer.extract_message_count(message_text)
+
+            if message_count:
+                # Extract reply JID - handle group messages
+                reply_jid = sender_jid
+                if " in " in sender_jid:
+                    reply_jid = sender_jid.split(" in ")[1]
+
+                # The chat_jid for fetching messages is the reply_jid
+                chat_jid = reply_jid
+
+                logger.info(
+                    f"Chat Summarizer triggered by {sender}: "
+                    f"requesting {message_count} messages from {chat_jid}"
+                )
+
+                # Process in background
+                asyncio.create_task(
+                    process_chat_summary_background(
+                        chat_summarizer_service=chat_summarizer,
+                        chat_jid=chat_jid,
+                        message_count=message_count,
+                        reply_jid=reply_jid,
+                        message_id=message_id,
+                        akasha_message_ids=akasha_message_ids,
+                    )
+                )
 
         # Handle Reply Agent triggers for image messages
         elif (

@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # Concurrency Configuration
     max_concurrent_sends: int = 5  # Max parallel message sends
 
+    # Chat Summarizer Configuration
+    chat_summarizer_enabled: bool = True
+    chat_summarizer_max_messages: int = 200  # Maximum messages to fetch
+
     @property
     def recipients_list(self) -> list[str]:
         """Parse comma-separated recipients into list."""

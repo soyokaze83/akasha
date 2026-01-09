@@ -7,7 +7,8 @@
       "Bash(uv pip install:*)",
       "Bash(cd:*)",
       "Bash(tree:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(python:*)"
     ]
   }
 }

@@ -28,8 +28,15 @@ AI-powered WhatsApp assistant that responds to messages with web search capabili
 - Background processing prevents webhook timeouts
 - Rate limiting per sender to prevent abuse
 
-### Chat Summarizer (Coming Soon)
-Summarize WhatsApp chat history using LLMs.
+### Chat Summarizer
+Summarize recent chat messages on demand.
+
+- Trigger with "akasha, summarize the previous {n} messages" (e.g., "akasha, summarize the previous 50 messages")
+- Case-insensitive command (exact phrase required)
+- Works in both individual and group chats
+- Summary language matches the predominant language of messages
+- Shows who discussed what topics (participant attribution)
+- Configurable maximum message limit (default: 200)
 
 ## Quick Start
 
@@ -100,6 +107,8 @@ Summarize WhatsApp chat history using LLMs.
 | `OPENAI_API_KEY` | If using OpenAI | - | OpenAI API key |
 | `OPENAI_MODEL` | No | `gpt-4o-mini` | OpenAI model to use |
 | `REPLY_AGENT_ENABLED` | No | `true` | Enable/disable the Reply Agent |
+| `CHAT_SUMMARIZER_ENABLED` | No | `true` | Enable/disable the Chat Summarizer |
+| `CHAT_SUMMARIZER_MAX_MESSAGES` | No | `200` | Maximum messages to summarize |
 | `GOOGLE_SEARCH_API_KEY` | For Reply Agent | - | Google Custom Search API key |
 | `GOOGLE_SEARCH_ENGINE_ID` | For Reply Agent | - | Google Custom Search Engine ID |
 | `WHATSAPP_RECIPIENTS` | Yes | - | Comma-separated recipient JIDs |
@@ -135,6 +144,8 @@ Summarize WhatsApp chat history using LLMs.
 | POST | `/mandarin/trigger-daily` | Trigger daily job manually |
 | POST | `/reply-agent/query` | Process a query with the Reply Agent |
 | GET | `/reply-agent/status` | Get Reply Agent configuration status |
+| POST | `/chat-summarizer/summarize` | Summarize messages from a chat |
+| GET | `/chat-summarizer/status` | Get Chat Summarizer configuration status |
 
 ### Generate Passage
 
@@ -175,6 +186,20 @@ curl -X POST http://localhost:8080/reply-agent/query \
 curl http://localhost:8080/reply-agent/status
 ```
 
+### Chat Summarizer
+
+```bash
+# Summarize last 50 messages from a chat via API
+curl -X POST http://localhost:8080/chat-summarizer/summarize \
+  -H "Content-Type: application/json" \
+  -d '{"chat_jid": "6281234567890@s.whatsapp.net", "message_count": 50}'
+
+# Check Chat Summarizer status
+curl http://localhost:8080/chat-summarizer/status
+```
+
+**Via WhatsApp:** Send "akasha, summarize the previous 50 messages" in any chat.
+
 ## Project Structure
 
 ```
@@ -197,7 +222,7 @@ akasha/
 │   └── services/
 │       ├── mandarin_generator/   # Mandarin passage service
 │       ├── reply_agent/          # AI-powered reply assistant
-│       └── chat_summarizer/      # Chat summarization (future)
+│       └── chat_summarizer/      # Chat history summarization
 ├── docker-compose.yml
 ├── Dockerfile
 └── pyproject.toml
