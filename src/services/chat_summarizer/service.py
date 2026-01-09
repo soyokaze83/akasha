@@ -54,8 +54,11 @@ class ChatSummarizerService:
         formatted_messages = []
 
         for msg in messages:
-            sender = msg.get("pushname") or msg.get("sender") or "Unknown"
-            text = msg.get("text") or msg.get("message", {}).get("text", "")
+            # GoWA returns sender_jid (e.g., "6289608842518@s.whatsapp.net")
+            # Extract phone number from JID for display
+            sender_jid = msg.get("sender_jid", "")
+            sender = sender_jid.split("@")[0] if sender_jid else "Unknown"
+            text = msg.get("content", "")
 
             if text:  # Only include text messages
                 participants.add(sender)

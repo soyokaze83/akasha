@@ -245,7 +245,9 @@ class GowaClient:
             if data.get("code") != "SUCCESS":
                 raise GowaClientError(f"Failed to fetch messages: {data}")
 
-            messages = data.get("results", [])
+            # GoWA returns nested structure: results.data contains the messages array
+            results = data.get("results", {})
+            messages = results.get("data", []) if isinstance(results, dict) else []
             logger.info(f"Fetched {len(messages)} messages from {chat_jid}")
             return messages
 
