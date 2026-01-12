@@ -3,12 +3,38 @@
 import base64
 import json
 import logging
+import re
+from enum import Enum
 from typing import Optional
 
 from src.core.config import settings
 from src.services.reply_agent.tools import OPENAI_TOOLS, web_search_tool
 
 logger = logging.getLogger(__name__)
+
+
+class ResponseState(Enum):
+    """States for orchestrating LLM response handling."""
+
+    NEEDS_TOOL_CALL = "needs_tool_call"  # Has tool calls to execute
+    INTERMEDIARY = "intermediary"  # "Let me search..." type response
+    FINAL_ANSWER = "final_answer"  # Actual complete answer
+
+
+# Patterns that indicate intermediary/planning responses (not final answers)
+INTERMEDIARY_PATTERNS = [
+    # English patterns
+    r"(?i)^(let me|i'll|i will|hold on|one moment|just a moment)",
+    r"(?i)^(searching|looking|checking|finding)",
+    r"(?i)(search(ing)? for|look(ing)? (up|for)|check(ing)?)\s+(that|this|it|the)",
+    r"(?i)^(wait|give me a (moment|second|sec|minute))",
+    r"(?i)^(okay,? )?(let me|i'll) (search|look|check|find)",
+    # Indonesian patterns
+    r"(?i)^(tunggu|sebentar|coba|bentar)",
+    r"(?i)^saya (akan|coba|mau) (cari|mencari|cek)",
+    r"(?i)(mencari|carikan|cek dulu|cari dulu)",
+    r"(?i)^(oke|ok|baik),? (tunggu|sebentar|saya coba)",
+]
 
 SYSTEM_INSTRUCTION = """You are Akasha, a helpful and friendly AI assistant available via WhatsApp.
 
@@ -49,6 +75,7 @@ class ReplyAgentService:
 
     TRIGGER_PHRASE = "hey akasha,"
     MAX_TOOL_CALLS = 3
+    MAX_ORCHESTRATION_ITERATIONS = 5  # Extra iterations for re-prompts
 
     def should_trigger(self, message: str) -> bool:
         """Check if message should trigger the agent."""
@@ -57,6 +84,35 @@ class ReplyAgentService:
     def extract_query(self, message: str) -> str:
         """Extract the user query after the trigger phrase."""
         return message[len(self.TRIGGER_PHRASE) :].strip()
+
+    def _classify_response(self, text: str, has_tool_calls: bool) -> ResponseState:
+        """
+        Classify the LLM response into a state for orchestration.
+
+        This implements a LangGraph-style state machine that ensures we only
+        return final answers, not intermediary feedback like "Let me search...".
+
+        Args:
+            text: The response text from the LLM
+            has_tool_calls: Whether the response contains tool calls
+
+        Returns:
+            ResponseState indicating what action to take next
+        """
+        if has_tool_calls:
+            return ResponseState.NEEDS_TOOL_CALL
+
+        if not text:
+            return ResponseState.INTERMEDIARY  # Empty response, retry
+
+        # Short responses that match intermediary patterns should not be returned
+        if len(text.strip()) < 200:
+            for pattern in INTERMEDIARY_PATTERNS:
+                if re.search(pattern, text.strip()):
+                    logger.debug(f"Matched intermediary pattern: {pattern}")
+                    return ResponseState.INTERMEDIARY
+
+        return ResponseState.FINAL_ANSWER
 
     async def process_query(
         self,
@@ -168,7 +224,11 @@ User's question/comment: {query}"""
         image_data: Optional[bytes] = None,
         image_mime_type: Optional[str] = None,
     ) -> tuple[str, list[str]]:
-        """Process query using OpenAI with function calling and optional image."""
+        """Process query using OpenAI with orchestrated tool calling.
+
+        Uses a state machine to ensure we only return final answers,
+        not intermediary feedback like "Let me search for that".
+        """
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(
@@ -196,20 +256,36 @@ User's question/comment: {query}"""
             {"role": "user", "content": user_content},
         ]
         sources_used: list[str] = []
+        tool_calls_made = 0
 
-        for iteration in range(self.MAX_TOOL_CALLS):
+        # Orchestration loop - only exits when we have a validated final answer
+        for iteration in range(self.MAX_ORCHESTRATION_ITERATIONS):
+            # Disable tools after MAX_TOOL_CALLS to force text response
+            use_tools = tool_calls_made < self.MAX_TOOL_CALLS
+
             response = await client.chat.completions.create(
                 model=settings.openai_model,
                 messages=messages,
-                tools=OPENAI_TOOLS,
-                tool_choice="auto",
+                tools=OPENAI_TOOLS if use_tools else None,
+                tool_choice="auto" if use_tools else None,
                 timeout=45.0,
             )
 
             assistant_message = response.choices[0].message
+            has_tool_calls = bool(assistant_message.tool_calls)
+            response_text = assistant_message.content or ""
 
-            if assistant_message.tool_calls:
+            # Classify the response using state machine
+            state = self._classify_response(response_text, has_tool_calls)
+            logger.debug(
+                f"OpenAI iteration {iteration}: state={state.value}, "
+                f"text_len={len(response_text)}, tool_calls={tool_calls_made}"
+            )
+
+            if state == ResponseState.NEEDS_TOOL_CALL:
+                # Execute tool calls
                 messages.append(assistant_message)
+                tool_calls_made += 1
 
                 for tool_call in assistant_message.tool_calls:
                     if tool_call.function.name == "web_search":
@@ -229,10 +305,31 @@ User's question/comment: {query}"""
                                 "content": json.dumps(search_results),
                             }
                         )
-            else:
-                return assistant_message.content or "", sources_used
+                # Continue loop to get response with search results
 
-        # Max iterations reached, get final response without tools
+            elif state == ResponseState.INTERMEDIARY:
+                # Don't return intermediary feedback - prompt for actual answer
+                logger.debug(
+                    f"Detected intermediary response: {response_text[:80]}..."
+                )
+                messages.append(assistant_message)
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Don't tell me what you're going to do - "
+                            "just do it and give me the answer directly."
+                        ),
+                    }
+                )
+                # Continue loop
+
+            elif state == ResponseState.FINAL_ANSWER:
+                # We have a real answer - return it
+                return response_text, sources_used
+
+        # Fallback: max iterations reached, force final response without tools
+        logger.warning("OpenAI max orchestration iterations reached, forcing response")
         response = await client.chat.completions.create(
             model=settings.openai_model,
             messages=messages,
@@ -338,11 +435,17 @@ User's question/comment: {query}"""
 
             raise last_error or ClientError("All API keys exhausted")
 
-        for iteration in range(self.MAX_TOOL_CALLS):
+        tool_calls_made = 0
+
+        # Orchestration loop - only exits when we have a validated final answer
+        for iteration in range(self.MAX_ORCHESTRATION_ITERATIONS):
+            # Disable tools after MAX_TOOL_CALLS to force text response
+            use_tools = tool_calls_made < self.MAX_TOOL_CALLS
+
             response = await call_with_rotation(
                 types.GenerateContentConfig(
                     system_instruction=REALISTIC_SYSTEM_INSTRUCTION,
-                    tools=tools,
+                    tools=tools if use_tools else None,
                 )
             )
 
@@ -354,8 +457,20 @@ User's question/comment: {query}"""
                 if hasattr(part, "function_call") and part.function_call:
                     function_calls.append(part.function_call)
 
-            if function_calls:
+            has_tool_calls = bool(function_calls)
+            response_text = response.text or ""
+
+            # Classify the response using state machine
+            state = self._classify_response(response_text, has_tool_calls)
+            logger.debug(
+                f"Gemini iteration {iteration}: state={state.value}, "
+                f"text_len={len(response_text)}, tool_calls={tool_calls_made}"
+            )
+
+            if state == ResponseState.NEEDS_TOOL_CALL:
+                # Execute tool calls
                 contents.append(candidate.content)
+                tool_calls_made += 1
 
                 function_responses = []
                 for fc in function_calls:
@@ -378,10 +493,35 @@ User's question/comment: {query}"""
                         )
 
                 contents.append(types.Content(role="user", parts=function_responses))
-            else:
-                return response.text or "", sources_used
+                # Continue loop to get response with search results
 
-        # Max iterations, get final response without tools
+            elif state == ResponseState.INTERMEDIARY:
+                # Don't return intermediary feedback - prompt for actual answer
+                logger.debug(
+                    f"Detected intermediary response: {response_text[:80]}..."
+                )
+                contents.append(candidate.content)
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_text(
+                                text=(
+                                    "Don't tell me what you're going to do - "
+                                    "just do it and give me the answer directly."
+                                )
+                            )
+                        ],
+                    )
+                )
+                # Continue loop
+
+            elif state == ResponseState.FINAL_ANSWER:
+                # We have a real answer - return it
+                return response_text, sources_used
+
+        # Fallback: max iterations reached, force final response without tools
+        logger.warning("Gemini max orchestration iterations reached, forcing response")
         response = await call_with_rotation(
             types.GenerateContentConfig(
                 system_instruction=REALISTIC_SYSTEM_INSTRUCTION,
