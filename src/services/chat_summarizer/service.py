@@ -48,25 +48,33 @@ class ChatSummarizerService:
             name_cache: Cache dict mapping JID -> display name
 
         Returns:
-            Display name or phone number as fallback
+            Display name or identifier as fallback
         """
         if sender_jid in name_cache:
             return name_cache[sender_jid]
 
-        # Extract phone number as fallback (also strip device ID if present)
-        phone_number = sender_jid.split("@")[0].split(":")[0] if sender_jid else "Unknown"
+        # Extract the identifier (strip device ID if present)
+        identifier = sender_jid.split("@")[0].split(":")[0] if sender_jid else "Unknown"
+
+        # Check if this is a LID (Linked ID) - cannot be resolved via /user/info
+        if sender_jid.endswith("@lid"):
+            # LID format - use a friendlier label with last 4 digits
+            display_name = f"User {identifier[-4:]}"
+            name_cache[sender_jid] = display_name
+            logger.debug(f"LID detected, using fallback: {sender_jid} -> {display_name}")
+            return display_name
 
         try:
-            # Normalize JID (remove device ID if present)
-            normalized_jid = phone_number + "@s.whatsapp.net"
+            # Standard phone JID - can be resolved via API
+            normalized_jid = identifier + "@s.whatsapp.net"
             user_info = await gowa_client.get_user_info(normalized_jid)
-            display_name = user_info.get("verified_name") or phone_number
+            display_name = user_info.get("verified_name") or identifier
             name_cache[sender_jid] = display_name
             return display_name
         except Exception as e:
             logger.debug(f"Could not resolve name for {sender_jid}: {e}")
-            name_cache[sender_jid] = phone_number
-            return phone_number
+            name_cache[sender_jid] = identifier
+            return identifier
 
     async def summarize_messages(
         self,
