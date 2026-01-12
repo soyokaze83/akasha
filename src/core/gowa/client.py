@@ -251,6 +251,37 @@ class GowaClient:
             logger.info(f"Fetched {len(messages)} messages from {chat_jid}")
             return messages
 
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(1),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
+    )
+    async def get_user_info(self, phone_jid: str) -> dict:
+        """
+        Get user information including display name.
+
+        Args:
+            phone_jid: The user's JID (e.g., "6289685028129@s.whatsapp.net")
+
+        Returns:
+            Dict with verified_name, status, picture_id
+
+        Raises:
+            GowaClientError: If fetch fails
+        """
+        async with self._get_client() as client:
+            response = await client.get(
+                "/user/info",
+                params={"phone": phone_jid},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("code") != "SUCCESS":
+                raise GowaClientError(f"Failed to get user info: {data}")
+
+            return data.get("results", {})
+
 
 # Singleton instance for dependency injection
 gowa_client = GowaClient()

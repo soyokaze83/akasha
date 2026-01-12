@@ -5,6 +5,7 @@ import re
 from typing import Optional
 
 from src.core.config import settings
+from src.core.gowa import gowa_client
 from src.llm import get_configured_llm
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,39 @@ class ChatSummarizerService:
             return min(count, settings.chat_summarizer_max_messages)
         return None
 
+    async def _resolve_display_name(
+        self,
+        sender_jid: str,
+        name_cache: dict[str, str],
+    ) -> str:
+        """
+        Resolve a JID to a display name, using cache to avoid redundant API calls.
+
+        Args:
+            sender_jid: The sender's JID
+            name_cache: Cache dict mapping JID -> display name
+
+        Returns:
+            Display name or phone number as fallback
+        """
+        if sender_jid in name_cache:
+            return name_cache[sender_jid]
+
+        # Extract phone number as fallback (also strip device ID if present)
+        phone_number = sender_jid.split("@")[0].split(":")[0] if sender_jid else "Unknown"
+
+        try:
+            # Normalize JID (remove device ID if present)
+            normalized_jid = phone_number + "@s.whatsapp.net"
+            user_info = await gowa_client.get_user_info(normalized_jid)
+            display_name = user_info.get("verified_name") or phone_number
+            name_cache[sender_jid] = display_name
+            return display_name
+        except Exception as e:
+            logger.debug(f"Could not resolve name for {sender_jid}: {e}")
+            name_cache[sender_jid] = phone_number
+            return phone_number
+
     async def summarize_messages(
         self,
         messages: list[dict],
@@ -50,20 +84,22 @@ class ChatSummarizerService:
         if not messages:
             return "No messages to summarize.", []
 
+        # Cache for name lookups to avoid redundant API calls
+        name_cache: dict[str, str] = {}
+
         # Extract participants and format messages
         participants = set()
         formatted_messages = []
 
         for msg in messages:
-            # GoWA returns sender_jid (e.g., "6289608842518@s.whatsapp.net")
-            # Extract phone number from JID for display
             sender_jid = msg.get("sender_jid", "")
-            sender = sender_jid.split("@")[0] if sender_jid else "Unknown"
             text = msg.get("content", "")
 
             if text:  # Only include text messages
-                participants.add(sender)
-                formatted_messages.append(f"[{sender}]: {text}")
+                # Resolve display name (uses cache)
+                sender_name = await self._resolve_display_name(sender_jid, name_cache)
+                participants.add(sender_name)
+                formatted_messages.append(f"[{sender_name}]: {text}")
 
         if not formatted_messages:
             return "No text messages found to summarize.", []
