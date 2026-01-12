@@ -410,7 +410,7 @@ async def handle_webhook(request: Request) -> dict:
         ):
             message_count = chat_summarizer.extract_message_count(message_text)
 
-            if message_count:
+            if message_count is not None and message_count > 0:
                 # Extract reply JID - handle group messages
                 reply_jid = sender_jid
                 if " in " in sender_jid:
@@ -435,6 +435,16 @@ async def handle_webhook(request: Request) -> dict:
                         akasha_message_ids=akasha_message_ids,
                     )
                 )
+
+        # Debug logging for near-miss summarizer triggers
+        elif (
+            settings.chat_summarizer_enabled
+            and event_type == "message.text"
+            and message_text
+            and "summarize" in message_text.lower()
+            and "akasha" in message_text.lower()
+        ):
+            logger.debug(f"Potential summarizer command not matched: {message_text!r}")
 
         # Handle Reply Agent triggers for image messages
         elif (

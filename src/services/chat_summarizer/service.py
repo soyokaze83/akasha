@@ -15,8 +15,9 @@ class ChatSummarizerService:
 
     # Case-insensitive trigger pattern
     # Matches: "akasha, summarize the previous 50 messages"
+    # Also allows trailing whitespace and punctuation (.!?)
     TRIGGER_PATTERN = re.compile(
-        r"^akasha,\s*summarize\s+the\s+previous\s+(\d+)\s+messages?$",
+        r"^akasha,\s*summarize\s+the\s+previous\s+(\d+)\s+messages?\s*[.!?]*\s*$",
         re.IGNORECASE,
     )
 
