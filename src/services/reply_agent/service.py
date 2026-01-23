@@ -148,7 +148,6 @@ User's question/comment: {query}"""
             full_prompt = query
 
         primary_provider = settings.llm_provider.lower()
-        fallback_provider = "openai" if primary_provider == "gemini" else "gemini"
 
         # Try primary provider first
         try:
@@ -181,15 +180,20 @@ User's question/comment: {query}"""
                 or "temporarily unavailable" in error_str
             )
 
-            # If fallback is enabled and it's a fallback-worthy error, try fallback
+            # Fallback is always OpenRouter (text-only, no vision)
             if settings.llm_fallback_enabled and is_fallback_worthy_error:
-                if self._can_use_provider(fallback_provider):
+                if self._can_use_provider("openrouter"):
+                    if image_data:
+                        logger.info(
+                            "Stripping image data for OpenRouter fallback "
+                            "(model does not support vision)"
+                        )
                     logger.warning(
                         f"Primary provider '{primary_provider}' failed ({type(e).__name__}), "
-                        f"falling back to '{fallback_provider}'"
+                        f"falling back to 'openrouter'"
                     )
                     return await self._call_provider(
-                        fallback_provider, full_prompt, image_data, image_mime_type
+                        "openrouter", full_prompt, None, None
                     )
 
             # Re-raise if fallback not possible
@@ -201,6 +205,8 @@ User's question/comment: {query}"""
             return bool(settings.openai_api_key)
         elif provider == "gemini":
             return bool(settings.gemini_api_key)
+        elif provider == "openrouter":
+            return bool(settings.openrouter_api_key)
         return False
 
     async def _call_provider(
@@ -215,6 +221,8 @@ User's question/comment: {query}"""
             return await self._process_with_openai(prompt, image_data, image_mime_type)
         elif provider == "gemini":
             return await self._process_with_gemini(prompt, image_data, image_mime_type)
+        elif provider == "openrouter":
+            return await self._process_with_openrouter(prompt)
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
 
@@ -528,6 +536,104 @@ User's question/comment: {query}"""
             )
         )
         return response.text or "", sources_used
+
+    async def _process_with_openrouter(
+        self,
+        query: str,
+    ) -> tuple[str, list[str]]:
+        """Process query using OpenRouter fallback (text-only, with tool calling).
+
+        Uses the same OpenAI-compatible API format but with dedicated
+        OpenRouter credentials. No vision/image support.
+        """
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=settings.openrouter_api_key,
+        )
+
+        messages: list[dict] = [
+            {"role": "system", "content": REALISTIC_SYSTEM_INSTRUCTION},
+            {"role": "user", "content": query},
+        ]
+        sources_used: list[str] = []
+        tool_calls_made = 0
+
+        for iteration in range(self.MAX_ORCHESTRATION_ITERATIONS):
+            use_tools = tool_calls_made < self.MAX_TOOL_CALLS
+
+            response = await client.chat.completions.create(
+                model=settings.openrouter_model,
+                messages=messages,
+                tools=OPENAI_TOOLS if use_tools else None,
+                tool_choice="auto" if use_tools else None,
+                timeout=45.0,
+            )
+
+            assistant_message = response.choices[0].message
+            has_tool_calls = bool(assistant_message.tool_calls)
+            response_text = assistant_message.content or ""
+
+            state = self._classify_response(response_text, has_tool_calls)
+            logger.debug(
+                f"OpenRouter iteration {iteration}: state={state.value}, "
+                f"text_len={len(response_text)}, tool_calls={tool_calls_made}"
+            )
+
+            if state == ResponseState.NEEDS_TOOL_CALL:
+                messages.append(assistant_message)
+                tool_calls_made += 1
+
+                for tool_call in assistant_message.tool_calls:
+                    if tool_call.function.name == "web_search":
+                        args = json.loads(tool_call.function.arguments)
+                        search_query = args.get("query", "")
+
+                        logger.info(
+                            f"OpenRouter tool call: web_search('{search_query}')"
+                        )
+                        search_results = await web_search_tool.search(search_query)
+
+                        for result in search_results:
+                            sources_used.append(result["link"])
+
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(search_results),
+                            }
+                        )
+
+            elif state == ResponseState.INTERMEDIARY:
+                logger.debug(
+                    f"Detected intermediary response: {response_text[:80]}..."
+                )
+                messages.append(assistant_message)
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Don't tell me what you're going to do - "
+                            "just do it and give me the answer directly."
+                        ),
+                    }
+                )
+
+            elif state == ResponseState.FINAL_ANSWER:
+                return response_text, sources_used
+
+        # Max iterations reached
+        logger.warning(
+            "OpenRouter max orchestration iterations reached, forcing response"
+        )
+        response = await client.chat.completions.create(
+            model=settings.openrouter_model,
+            messages=messages,
+            timeout=45.0,
+        )
+        return response.choices[0].message.content or "", sources_used
 
 
 # Singleton instance

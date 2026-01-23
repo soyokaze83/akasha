@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
+    # OpenRouter Fallback Configuration
+    openrouter_api_key: str = ""
+    openrouter_model: str = "xiaomi/mimo-v2-flash:free"
+
     # Reply Agent - Google Search Configuration
     google_search_api_key: str = ""
     google_search_engine_id: str = ""
