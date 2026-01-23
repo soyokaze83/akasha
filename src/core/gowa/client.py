@@ -23,6 +23,9 @@ class GowaClientError(Exception):
     pass
 
 
+GOWA_MAX_MESSAGES_LIMIT = 100
+
+
 class GowaClient:
     """HTTP client for GoWA WhatsApp service."""
 
@@ -213,16 +216,14 @@ class GowaClient:
             logger.info(f"Downloaded media from path {file_path}: {mime_type}, {len(response.content)} bytes")
             return response.content, mime_type
 
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_fixed(1),
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
-    )
     async def get_chat_messages(
         self, chat_jid: str, limit: int = 50
     ) -> list[dict]:
         """
         Fetch message history from a specific chat.
+
+        Handles pagination automatically when limit exceeds GoWA's
+        per-request maximum of 100 messages.
 
         Args:
             chat_jid: The chat JID (individual or group)
@@ -234,10 +235,43 @@ class GowaClient:
         Raises:
             GowaClientError: If fetch fails
         """
+        if limit <= GOWA_MAX_MESSAGES_LIMIT:
+            return await self._fetch_chat_messages_page(chat_jid, limit, offset=0)
+
+        all_messages = []
+        offset = 0
+        remaining = limit
+
+        while remaining > 0:
+            page_limit = min(remaining, GOWA_MAX_MESSAGES_LIMIT)
+            page = await self._fetch_chat_messages_page(chat_jid, page_limit, offset)
+
+            if not page:
+                break
+
+            all_messages.extend(page)
+            offset += len(page)
+            remaining -= len(page)
+
+            if len(page) < page_limit:
+                break
+
+        logger.info(f"Fetched {len(all_messages)} messages from {chat_jid} (paginated)")
+        return all_messages
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(1),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
+    )
+    async def _fetch_chat_messages_page(
+        self, chat_jid: str, limit: int, offset: int = 0
+    ) -> list[dict]:
+        """Fetch a single page of messages from GoWA."""
         async with self._get_client() as client:
             response = await client.get(
                 f"/chat/{chat_jid}/messages",
-                params={"limit": limit},
+                params={"limit": limit, "offset": offset},
             )
             response.raise_for_status()
             data = response.json()
@@ -245,10 +279,9 @@ class GowaClient:
             if data.get("code") != "SUCCESS":
                 raise GowaClientError(f"Failed to fetch messages: {data}")
 
-            # GoWA returns nested structure: results.data contains the messages array
             results = data.get("results", {})
             messages = results.get("data", []) if isinstance(results, dict) else []
-            logger.info(f"Fetched {len(messages)} messages from {chat_jid}")
+            logger.info(f"Fetched {len(messages)} messages from {chat_jid} (offset={offset})")
             return messages
 
     @retry(
