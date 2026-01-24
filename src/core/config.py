@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # Concurrency Configuration
     max_concurrent_sends: int = 5  # Max parallel message sends
 
+    # Qdrant Vector Store Configuration
+    qdrant_url: str = "http://qdrant:6333"
+    topic_similarity_threshold: float = 0.85
+    gemini_embedding_model: str = "gemini-embedding-001"
+
     # Chat Summarizer Configuration
     chat_summarizer_enabled: bool = True
     chat_summarizer_max_messages: int = 200  # Maximum messages to fetch

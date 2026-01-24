@@ -125,46 +125,85 @@ class PassageGeneratorService:
         # Fallback: hard truncate if no sentence boundary found
         return passage[:max_chars]
 
-    async def _fetch_web_content(self) -> tuple[Optional[str], Optional[str]]:
+    async def _fetch_web_search_results(self) -> tuple[Optional[list[dict]], Optional[str]]:
         """
-        Fetch web content for topic selection.
+        Fetch web search results for topic selection.
 
         Returns:
-            Tuple of (page_content, failure_reason) - one will be None
+            Tuple of (results_list, failure_reason) - one will be None
         """
         from src.services.reply_agent.tools import web_search_tool
-        from src.utils.web_scraper import fetch_page_text
 
-        # Search for today's news in Chinese
         search_query = "今日新闻 有趣的话题"
         logger.info(f"Searching for topics with query: {search_query}")
 
-        results = await web_search_tool.search(search_query, num_results=3)
+        results = await web_search_tool.search(search_query, num_results=5)
 
         if not results:
             return None, "No search results returned"
 
-        # Fetch content from top result for LLM to analyze
-        top_result = results[0]
-        logger.info(f"Fetching content from: {top_result['title']}")
+        return results, None
 
-        page_content = await fetch_page_text(top_result["link"])
+    async def _select_unique_topic(
+        self, results: list[dict]
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Select a topic from search results that is not too similar to past topics.
 
-        # Limit to first 2000 characters to avoid overwhelming LLM
-        if page_content and len(page_content) > 2000:
-            page_content = page_content[:2000]
-            logger.info("Limited page content to 2000 characters")
+        Iterates through results, fetches page content, and checks similarity
+        against the Qdrant vector store. Returns the first result that passes
+        the threshold check.
 
-        if not page_content:
+        Args:
+            results: List of search result dicts with 'title', 'link', 'snippet'
+
+        Returns:
+            Tuple of (page_content, source_url) or (None, None) if all fail
+        """
+        from src.core.vector_store import topic_vector_store
+        from src.utils.web_scraper import fetch_page_text
+
+        best_candidate: Optional[tuple[str, str, float]] = None  # (content, url, score)
+
+        for result in results:
+            title = result.get("title", "")
+            link = result.get("link", "")
+            logger.info(f"Trying topic source: {title}")
+
+            page_content = await fetch_page_text(link)
+
+            # Limit to first 2000 characters
+            if page_content and len(page_content) > 2000:
+                page_content = page_content[:2000]
+
+            if not page_content:
+                # Fall back to snippet if page fetch fails
+                page_content = result.get("snippet", "")
+
+            if not page_content:
+                logger.warning(f"No content available from {link}, skipping")
+                continue
+
+            is_similar, score = await topic_vector_store.is_similar(page_content)
+
+            if not is_similar:
+                logger.info(f"Selected unique topic from: {title} (score={score:.4f})")
+                return page_content, link
+
+            # Track the least similar candidate as fallback
+            if best_candidate is None or score < best_candidate[2]:
+                best_candidate = (page_content, link, score)
+
+            logger.info(f"Topic too similar (score={score:.4f}), trying next result")
+
+        # All results were similar - use the least similar one
+        if best_candidate:
             logger.warning(
-                f"Failed to fetch content from {top_result['link']}, using snippet instead"
+                f"All results similar, using least similar (score={best_candidate[2]:.4f})"
             )
-            page_content = top_result.get("snippet", "")
+            return best_candidate[0], best_candidate[1]
 
-        if not page_content:
-            return None, f"Failed to fetch content from {top_result['link']}"
-
-        return page_content, None
+        return None, None
 
     async def _generate_passage_from_web_content(
         self, page_content: str
@@ -258,15 +297,33 @@ class PassageGeneratorService:
             display_topic = topic
 
         elif settings.topic_selection_mode == "web_search":
-            # Web search mode: fetch content and generate in single LLM call
-            page_content, failure_reason = await self._fetch_web_content()
+            # Web search mode: fetch results, check similarity, generate
+            results, failure_reason = await self._fetch_web_search_results()
 
-            if page_content:
-                # Single LLM call for both topic selection and passage generation
-                passage, extracted_topic = await self._generate_passage_from_web_content(
-                    page_content
-                )
-                display_topic = f"网络话题: {extracted_topic}"
+            if results:
+                page_content, source_url = await self._select_unique_topic(results)
+
+                if page_content:
+                    passage, extracted_topic = await self._generate_passage_from_web_content(
+                        page_content
+                    )
+                    display_topic = f"网络话题: {extracted_topic}"
+
+                    # Store the used content embedding for future deduplication
+                    from src.core.vector_store import topic_vector_store
+
+                    await topic_vector_store.store(
+                        text=page_content,
+                        metadata={
+                            "topic": extracted_topic,
+                            "date": date.today().isoformat(),
+                            "source_url": source_url or "",
+                        },
+                    )
+                else:
+                    logger.warning("No usable content from search results, falling back to free topic")
+                    passage, display_topic = await self._generate_free_topic_passage()
+                    display_topic = "自由话题 (无可用搜索内容)"
             else:
                 # Fallback to free topic if web search fails
                 logger.warning(f"Web search failed: {failure_reason}, falling back to free topic mode")
