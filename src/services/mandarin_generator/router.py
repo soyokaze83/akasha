@@ -111,7 +111,7 @@ async def trigger_daily() -> TriggerDailyResponse:
 
     Useful for testing or sending an extra passage outside the schedule.
     """
-    await send_daily_passage()
+    await send_daily_passage(force=True)
     return TriggerDailyResponse(
         status="triggered",
         message="Daily passage job has been triggered",

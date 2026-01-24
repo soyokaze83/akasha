@@ -45,12 +45,15 @@ async def _send_to_recipient(
             return (recipient, False, f"Unexpected: {e}")
 
 
-async def send_daily_passage() -> None:
+async def send_daily_passage(force: bool = False) -> None:
     """
     Generate and send daily Mandarin passage to all recipients.
 
     This function is called by the scheduler at the configured time.
     Uses parallel sending with concurrency control and idempotency tracking.
+
+    Args:
+        force: If True, bypass idempotency check and always generate + send.
     """
     logger.info("Starting daily Mandarin passage generation...")
 
@@ -62,9 +65,13 @@ async def send_daily_passage() -> None:
     # Generate idempotency key for today
     idempotency_key = f"daily_passage_{date.today().isoformat()}"
 
-    # Get already-sent recipients (for retry scenarios)
-    already_sent = sent_recipients.get(idempotency_key, set())
-    pending_recipients = [r for r in recipients if r not in already_sent]
+    if force:
+        pending_recipients = recipients
+        already_sent: set[str] = set()
+    else:
+        # Get already-sent recipients (for retry scenarios)
+        already_sent = sent_recipients.get(idempotency_key, set())
+        pending_recipients = [r for r in recipients if r not in already_sent]
 
     if not pending_recipients:
         logger.info(f"All recipients already received today's passage (key: {idempotency_key})")
