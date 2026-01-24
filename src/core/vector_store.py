@@ -12,7 +12,7 @@ from src.core.config import settings
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "mandarin_topics"
-EMBEDDING_DIMENSIONS = 768  # text-embedding-004 output size
+EMBEDDING_DIMENSIONS = 3072  # gemini-embedding-001 output size
 
 
 class TopicVectorStore:
@@ -28,13 +28,24 @@ class TopicVectorStore:
         return self._client
 
     async def _ensure_collection(self) -> None:
-        """Create the collection if it doesn't exist."""
+        """Create or recreate the collection if dimensions mismatch."""
         if self._collection_ensured:
             return
 
         client = self._get_client()
         collections = await client.get_collections()
         existing = [c.name for c in collections.collections]
+
+        if COLLECTION_NAME in existing:
+            info = await client.get_collection(COLLECTION_NAME)
+            current_size = info.config.params.vectors.size
+            if current_size != EMBEDDING_DIMENSIONS:
+                logger.warning(
+                    f"Collection dimension mismatch: existing={current_size}, "
+                    f"expected={EMBEDDING_DIMENSIONS}. Recreating collection."
+                )
+                await client.delete_collection(COLLECTION_NAME)
+                existing.remove(COLLECTION_NAME)
 
         if COLLECTION_NAME not in existing:
             await client.create_collection(
@@ -44,7 +55,7 @@ class TopicVectorStore:
                     distance=Distance.COSINE,
                 ),
             )
-            logger.info(f"Created Qdrant collection: {COLLECTION_NAME}")
+            logger.info(f"Created Qdrant collection: {COLLECTION_NAME} (dims={EMBEDDING_DIMENSIONS})")
 
         self._collection_ensured = True
 
