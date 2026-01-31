@@ -28,9 +28,11 @@ class IntermediaryClassifier(dspy.Signature):
 
     response_text: str = dspy.InputField(desc="The chatbot response text to classify")
     is_intermediary: Literal["yes", "no"] = dspy.OutputField(
-        desc="'yes' if the response is intermediary feedback (e.g., 'let me search', "
-        "'gimme a sec', 'I'll get back to you', 'stay tuned'). "
-        "'no' if it contains actual substantive information."
+        desc="'yes' if the response contains ANY promise to do something later or asks to wait "
+        "(e.g., 'let me search', 'gimme a sec', 'give me a sec', 'I'll get back to you', "
+        "'stay tuned', 'hold on', 'one moment', 'lemme check'). "
+        "Answer 'yes' even if there is some acknowledgment text before the wait request. "
+        "'no' ONLY if the response is a complete, final answer with no promises to return with more info."
     )
 
 
