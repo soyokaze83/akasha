@@ -31,8 +31,8 @@ src/
 │       └── models.py          # GoWA webhook payload models
 ├── llm/                       # LLM provider abstraction
 │   ├── base.py                # LLMClient Protocol + factory
-│   ├── gemini.py              # Gemini client with key rotation
-│   ├── openai.py              # OpenAI client (via OpenRouter)
+│   ├── gemini.py              # Gemini client (multimodal + key rotation)
+│   ├── openai.py              # OpenAI client (multimodal)
 │   ├── openrouter.py          # OpenRouter fallback (text-only)
 │   └── key_rotator.py         # API key rotation for rate limits
 ├── utils/                     # Utility modules
@@ -86,10 +86,19 @@ Use the abstraction layer, not direct clients:
 from src.llm import get_configured_llm
 
 llm_client = get_configured_llm()
+
+# Text-only generation
 response = await llm_client.generate_content(
     prompt="...",
     system_instruction="...",
     temperature=0.8,
+)
+
+# Multimodal generation with image (Gemini/OpenAI only, ignored by OpenRouter)
+response = await llm_client.generate_content(
+    prompt="What is in this image?",
+    image_data=image_bytes,           # Optional: bytes
+    image_mime_type="image/jpeg",     # Optional: MIME type
 )
 ```
 
@@ -103,8 +112,8 @@ return {"status": "ok"}  # Return immediately
 
 ### 5. Error Handling with Fallback
 LLM calls include automatic fallback on 429/503 errors:
-- Primary: Gemini with key rotation
-- Fallback: OpenRouter (text-only, no vision)
+- Primary: Gemini with key rotation (supports multimodal/vision)
+- Fallback: OpenRouter (text-only, image data ignored with warning)
 
 ## Development Commands
 
@@ -184,6 +193,7 @@ docker-compose logs -f whatsapp   # View GoWA logs
 
 1. [main.py](src/main.py) - Entry point, webhook routing logic
 2. [config.py](src/core/config.py) - All configuration options
-3. [reply_agent/service.py](src/services/reply_agent/service.py) - Complex LLM orchestration with tool calling
-4. [gowa/client.py](src/core/gowa/client.py) - WhatsApp API wrapper
-5. [docs/GOWA_INTEGRATION.md](docs/GOWA_INTEGRATION.md) - GoWA API reference
+3. [llm/base.py](src/llm/base.py) - LLMClient Protocol with multimodal support
+4. [reply_agent/service.py](src/services/reply_agent/service.py) - Complex LLM orchestration with tool calling
+5. [gowa/client.py](src/core/gowa/client.py) - WhatsApp API wrapper
+6. [docs/GOWA_INTEGRATION.md](docs/GOWA_INTEGRATION.md) - GoWA API reference

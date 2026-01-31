@@ -223,10 +223,10 @@ akasha/
 │   │   ├── background_tasks.py   # Async webhook processing
 │   │   └── gowa/                 # GoWA client
 │   ├── llm/
-│   │   ├── base.py               # LLM provider abstraction
-│   │   ├── gemini.py             # Gemini LLM client
-│   │   ├── openai.py             # OpenAI LLM client
-│   │   ├── openrouter.py         # OpenRouter fallback client
+│   │   ├── base.py               # LLMClient Protocol + factory
+│   │   ├── gemini.py             # Gemini client (multimodal + key rotation)
+│   │   ├── openai.py             # OpenAI client (multimodal)
+│   │   ├── openrouter.py         # OpenRouter fallback (text-only)
 │   │   └── key_rotator.py        # API key rotation for rate limits
 │   ├── utils/
 │   │   └── web_scraper.py        # Web scraping utilities

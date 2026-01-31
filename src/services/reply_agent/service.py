@@ -3,9 +3,10 @@
 import base64
 import json
 import logging
-import re
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
+
+import dspy
 
 from src.core.config import settings
 from src.services.reply_agent.tools import OPENAI_TOOLS, web_search_tool
@@ -21,20 +22,34 @@ class ResponseState(Enum):
     FINAL_ANSWER = "final_answer"  # Actual complete answer
 
 
-# Patterns that indicate intermediary/planning responses (not final answers)
-INTERMEDIARY_PATTERNS = [
-    # English patterns
-    r"(?i)^(let me|i'll|i will|hold on|one moment|just a moment)",
-    r"(?i)^(searching|looking|checking|finding)",
-    r"(?i)(search(ing)? for|look(ing)? (up|for)|check(ing)?)\s+(that|this|it|the)",
-    r"(?i)^(wait|give me a (moment|second|sec|minute))",
-    r"(?i)^(okay,? )?(let me|i'll) (search|look|check|find)",
-    # Indonesian patterns
-    r"(?i)^(tunggu|sebentar|coba|bentar)",
-    r"(?i)^saya (akan|coba|mau) (cari|mencari|cek)",
-    r"(?i)(mencari|carikan|cek dulu|cari dulu)",
-    r"(?i)^(oke|ok|baik),? (tunggu|sebentar|saya coba)",
-]
+# DSPy signature for intermediary response classification
+class IntermediaryClassifier(dspy.Signature):
+    """Classify whether a chatbot response is an intermediary acknowledgment or an actual answer."""
+
+    response_text: str = dspy.InputField(desc="The chatbot response text to classify")
+    is_intermediary: Literal["yes", "no"] = dspy.OutputField(
+        desc="'yes' if the response is intermediary feedback (e.g., 'let me search', "
+        "'gimme a sec', 'I'll get back to you', 'stay tuned'). "
+        "'no' if it contains actual substantive information."
+    )
+
+
+def _get_gemini_lm() -> dspy.LM:
+    """Get Gemini LM for DSPy."""
+    return dspy.LM(
+        model=f"gemini/{settings.gemini_model}",
+        api_key=settings.gemini_api_key.split(",")[0],  # Use first key
+        temperature=0.0,
+    )
+
+
+def _get_openrouter_lm() -> dspy.LM:
+    """Get OpenRouter LM for DSPy (fallback)."""
+    return dspy.LM(
+        model=f"openrouter/{settings.openrouter_model}",
+        api_key=settings.openrouter_api_key,
+        temperature=0.0,
+    )
 
 SYSTEM_INSTRUCTION = """You are Akasha, a helpful and friendly AI assistant available via WhatsApp.
 
@@ -67,7 +82,8 @@ Guidelines:
 4. No heavy content filters beyond basic legality. Adult topics are fine if asked—be straightforward, no awkwardness.
 5. If it's outside your abilities or against rules (no illegal stuff), just say politely "Sorry, can't help with that" or "That's a no from me".
 6. Match their vibe: playful if they're playful, serious if serious, chill or spicy if that's the energy.
-7. Be yourself—relaxed, fun, human. You're Akasha, their go-to chat buddy."""
+7. Be yourself—relaxed, fun, human. You're Akasha, their go-to chat buddy.
+8. When you need to search the web, call the web_search tool immediately without announcing it. Never say "let me search", "gimme a sec", "I'll get back to you", or "stay tuned". Just search and respond with the answer directly. For complex queries, start working immediately without acknowledging the complexity."""
 
 
 class ReplyAgentService:
@@ -85,12 +101,81 @@ class ReplyAgentService:
         """Extract the user query after the trigger phrase."""
         return message[len(self.TRIGGER_PHRASE) :].strip()
 
-    def _classify_response(self, text: str, has_tool_calls: bool) -> ResponseState:
+    async def _is_intermediary_response(self, text: str) -> bool:
+        """
+        Use DSPy to determine if response is intermediary feedback.
+        Falls back to OpenRouter if Gemini is exhausted.
+
+        Args:
+            text: The response text to classify
+
+        Returns:
+            True if intermediary, False if actual answer
+        """
+        import asyncio
+
+        async def classify_with_lm(lm: dspy.LM) -> str:
+            """Run classification with given LM."""
+            dspy.configure(lm=lm)
+            classifier = dspy.Predict(IntermediaryClassifier)
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: classifier(response_text=text[:500])
+            )
+            return result.is_intermediary
+
+        try:
+            # Try Gemini first
+            gemini_lm = _get_gemini_lm()
+            classification = await classify_with_lm(gemini_lm)
+
+        except Exception as e:
+            error_str = str(e).lower()
+            is_fallback_worthy = (
+                "429" in str(e)
+                or "quota" in error_str
+                or "rate" in error_str
+                or "exhausted" in error_str
+                or "503" in str(e)
+                or "unavailable" in error_str
+            )
+
+            if (
+                is_fallback_worthy
+                and settings.llm_fallback_enabled
+                and settings.openrouter_api_key
+            ):
+                logger.warning(
+                    f"Gemini classifier failed ({type(e).__name__}), "
+                    "falling back to OpenRouter"
+                )
+                try:
+                    openrouter_lm = _get_openrouter_lm()
+                    classification = await classify_with_lm(openrouter_lm)
+                except Exception as fallback_e:
+                    logger.warning(
+                        f"OpenRouter fallback also failed: {fallback_e}, "
+                        "defaulting to final_answer"
+                    )
+                    return False
+            else:
+                logger.warning(
+                    f"Intermediary classification failed: {e}, "
+                    "defaulting to final_answer"
+                )
+                return False
+
+        is_intermediary = classification == "yes"
+        logger.debug(
+            f"DSPy intermediary classification: {classification} -> {is_intermediary}"
+        )
+        return is_intermediary
+
+    async def _classify_response(self, text: str, has_tool_calls: bool) -> ResponseState:
         """
         Classify the LLM response into a state for orchestration.
-
-        This implements a LangGraph-style state machine that ensures we only
-        return final answers, not intermediary feedback like "Let me search...".
+        Uses DSPy-based classification to detect intermediary responses.
 
         Args:
             text: The response text from the LLM
@@ -105,12 +190,9 @@ class ReplyAgentService:
         if not text:
             return ResponseState.INTERMEDIARY  # Empty response, retry
 
-        # Short responses that match intermediary patterns should not be returned
-        if len(text.strip()) < 200:
-            for pattern in INTERMEDIARY_PATTERNS:
-                if re.search(pattern, text.strip()):
-                    logger.debug(f"Matched intermediary pattern: {pattern}")
-                    return ResponseState.INTERMEDIARY
+        # Use DSPy to detect intermediary responses
+        if await self._is_intermediary_response(text):
+            return ResponseState.INTERMEDIARY
 
         return ResponseState.FINAL_ANSWER
 
@@ -284,7 +366,7 @@ User's question/comment: {query}"""
             response_text = assistant_message.content or ""
 
             # Classify the response using state machine
-            state = self._classify_response(response_text, has_tool_calls)
+            state = await self._classify_response(response_text, has_tool_calls)
             logger.debug(
                 f"OpenAI iteration {iteration}: state={state.value}, "
                 f"text_len={len(response_text)}, tool_calls={tool_calls_made}"
@@ -469,7 +551,7 @@ User's question/comment: {query}"""
             response_text = response.text or ""
 
             # Classify the response using state machine
-            state = self._classify_response(response_text, has_tool_calls)
+            state = await self._classify_response(response_text, has_tool_calls)
             logger.debug(
                 f"Gemini iteration {iteration}: state={state.value}, "
                 f"text_len={len(response_text)}, tool_calls={tool_calls_made}"
@@ -575,7 +657,7 @@ User's question/comment: {query}"""
             has_tool_calls = bool(assistant_message.tool_calls)
             response_text = assistant_message.content or ""
 
-            state = self._classify_response(response_text, has_tool_calls)
+            state = await self._classify_response(response_text, has_tool_calls)
             logger.debug(
                 f"OpenRouter iteration {iteration}: state={state.value}, "
                 f"text_len={len(response_text)}, tool_calls={tool_calls_made}"
