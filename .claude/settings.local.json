@@ -8,7 +8,8 @@
       "Bash(cd:*)",
       "Bash(tree:*)",
       "Bash(dir:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(uv run pytest:*)"
     ]
   }
 }

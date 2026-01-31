@@ -17,8 +17,23 @@ class LLMClient(Protocol):
         system_instruction: Optional[str] = None,
         temperature: float = 0.8,
         max_output_tokens: int = 4000,
+        image_data: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
     ) -> str:
-        """Generate content from the LLM."""
+        """
+        Generate content from the LLM.
+
+        Args:
+            prompt: User prompt text
+            system_instruction: Optional system instruction
+            temperature: Creativity level (0.0-1.0 for most providers)
+            max_output_tokens: Maximum tokens in response
+            image_data: Optional image bytes for multimodal queries
+            image_mime_type: MIME type of the image (e.g., "image/jpeg", "image/png")
+
+        Returns:
+            Generated text content
+        """
         ...
 
 

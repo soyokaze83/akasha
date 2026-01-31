@@ -25,6 +25,8 @@ class GeminiClient:
         system_instruction: Optional[str] = None,
         temperature: float = 0.8,
         max_output_tokens: int = 4000,
+        image_data: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
     ) -> str:
         """
         Generate content using Gemini with automatic key rotation on errors.
@@ -34,6 +36,8 @@ class GeminiClient:
             system_instruction: Optional system instruction
             temperature: Creativity level (0.0-1.0)
             max_output_tokens: Maximum tokens in response
+            image_data: Optional image bytes for multimodal queries
+            image_mime_type: MIME type of the image (e.g., "image/jpeg", "image/png")
 
         Returns:
             Generated text content
@@ -47,6 +51,19 @@ class GeminiClient:
             max_output_tokens=max_output_tokens,
         )
 
+        # Build content - text only or multimodal with image
+        if image_data and image_mime_type:
+            parts: list[types.Part] = [
+                types.Part.from_bytes(data=image_data, mime_type=image_mime_type),
+                types.Part.from_text(text=prompt),
+            ]
+            contents: str | list[types.Content] = [
+                types.Content(role="user", parts=parts)
+            ]
+            logger.debug(f"Gemini processing multimodal query with image ({image_mime_type})")
+        else:
+            contents = prompt
+
         # Try each key once before giving up
         num_keys = len(self._rotator._keys)
         last_error: Optional[Exception] = None
@@ -56,7 +73,7 @@ class GeminiClient:
             try:
                 response = await client.aio.models.generate_content(
                     model=self.model,
-                    contents=prompt,
+                    contents=contents,
                     config=config,
                 )
 

@@ -35,6 +35,8 @@ class OpenRouterClient:
         system_instruction: Optional[str] = None,
         temperature: float = 0.8,
         max_output_tokens: int = 2000,
+        image_data: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
     ) -> str:
         """
         Generate content using OpenRouter (text-only).
@@ -44,10 +46,19 @@ class OpenRouterClient:
             system_instruction: Optional system instruction
             temperature: Creativity level (0.0-2.0)
             max_output_tokens: Maximum tokens in response
+            image_data: Ignored - OpenRouter does not support vision
+            image_mime_type: Ignored - OpenRouter does not support vision
 
         Returns:
             Generated text content
         """
+        # Log warning if image was provided (will be ignored)
+        if image_data:
+            logger.warning(
+                "OpenRouter does not support vision - image data will be ignored. "
+                "Consider using Gemini or OpenAI for multimodal queries."
+            )
+
         messages = []
 
         if system_instruction:

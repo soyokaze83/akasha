@@ -104,8 +104,11 @@ Summarize recent chat messages on demand.
 | `LLM_FALLBACK_ENABLED` | No | `true` | Enable fallback to other provider on errors |
 | `GEMINI_API_KEY` | If using Gemini | - | Gemini API key (comma-separated for rotation) |
 | `GEMINI_MODEL` | No | `gemini-2.0-flash` | Gemini model to use |
+| `GEMINI_EMBEDDING_MODEL` | No | `gemini-embedding-001` | Gemini embedding model for topic dedup |
 | `OPENAI_API_KEY` | If using OpenAI | - | OpenAI API key |
 | `OPENAI_MODEL` | No | `gpt-4o-mini` | OpenAI model to use |
+| `OPENROUTER_API_KEY` | For fallback | - | OpenRouter API key for LLM fallback |
+| `OPENROUTER_MODEL` | No | `xiaomi/mimo-v2-flash:free` | OpenRouter fallback model |
 | `REPLY_AGENT_ENABLED` | No | `true` | Enable/disable the Reply Agent |
 | `CHAT_SUMMARIZER_ENABLED` | No | `true` | Enable/disable the Chat Summarizer |
 | `CHAT_SUMMARIZER_MAX_MESSAGES` | No | `200` | Maximum messages to summarize |
@@ -122,6 +125,9 @@ Summarize recent chat messages on demand.
 | `GOWA_BASE_URL` | No | `http://whatsapp:3000` | GoWA service URL |
 | `GOWA_USERNAME` | No | `user1` | GoWA basic auth username |
 | `GOWA_PASSWORD` | No | `pass1` | GoWA basic auth password |
+| `GOWA_WEBHOOK_SECRET` | No | `your-secret-key` | Webhook signature verification |
+| `QDRANT_URL` | No | `http://qdrant:6333` | Qdrant vector store URL |
+| `TOPIC_SIMILARITY_THRESHOLD` | No | `0.85` | Similarity threshold for topic dedup |
 | `LOG_LEVEL` | No | `INFO` | Logging level |
 
 ## WhatsApp JID Formats
@@ -213,12 +219,17 @@ akasha/
 │   │   ├── logging.py            # Logging setup
 │   │   ├── scheduler.py          # APScheduler + cache cleanup
 │   │   ├── rate_limiter.py       # Per-sender rate limiting
+│   │   ├── vector_store.py       # Qdrant client for topic embeddings
 │   │   ├── background_tasks.py   # Async webhook processing
 │   │   └── gowa/                 # GoWA client
 │   ├── llm/
 │   │   ├── base.py               # LLM provider abstraction
 │   │   ├── gemini.py             # Gemini LLM client
-│   │   └── openai.py             # OpenAI LLM client
+│   │   ├── openai.py             # OpenAI LLM client
+│   │   ├── openrouter.py         # OpenRouter fallback client
+│   │   └── key_rotator.py        # API key rotation for rate limits
+│   ├── utils/
+│   │   └── web_scraper.py        # Web scraping utilities
 │   └── services/
 │       ├── mandarin_generator/   # Mandarin passage service
 │       ├── reply_agent/          # AI-powered reply assistant

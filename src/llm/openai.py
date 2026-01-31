@@ -1,5 +1,6 @@
 """OpenAI LLM client."""
 
+import base64
 import logging
 from typing import Optional
 
@@ -35,6 +36,8 @@ class OpenAIClient:
         system_instruction: Optional[str] = None,
         temperature: float = 0.8,
         max_output_tokens: int = 2000,
+        image_data: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
     ) -> str:
         """
         Generate content using OpenAI.
@@ -44,6 +47,8 @@ class OpenAIClient:
             system_instruction: Optional system instruction
             temperature: Creativity level (0.0-2.0)
             max_output_tokens: Maximum tokens in response
+            image_data: Optional image bytes for multimodal queries
+            image_mime_type: MIME type of the image (e.g., "image/jpeg", "image/png")
 
         Returns:
             Generated text content
@@ -53,7 +58,21 @@ class OpenAIClient:
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
 
-        messages.append({"role": "user", "content": prompt})
+        # Build user content - either simple text or multimodal with image
+        if image_data and image_mime_type:
+            b64_image = base64.b64encode(image_data).decode()
+            user_content: list[dict] | str = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{image_mime_type};base64,{b64_image}"},
+                },
+                {"type": "text", "text": prompt},
+            ]
+            logger.debug(f"OpenAI processing multimodal query with image ({image_mime_type})")
+        else:
+            user_content = prompt
+
+        messages.append({"role": "user", "content": user_content})
 
         response = await self.client.chat.completions.create(
             model=self.model,
