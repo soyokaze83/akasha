@@ -43,6 +43,7 @@ media_file_paths: dict[str, tuple[str, float]] = {}
 # In-memory set to track processed message IDs (prevent duplicate processing)
 # Key: message_id, Value: timestamp
 processed_message_ids: dict[str, float] = {}
+processed_message_lock = asyncio.Lock()  # Protect against concurrent webhook access
 
 # Cleanup threshold: 24 hours
 MESSAGE_ID_TTL = 86400
@@ -225,6 +226,10 @@ async def handle_webhook(request: Request) -> dict:
         else:
             event_type = "other"
 
+        # Only track actionable events to avoid blocking subsequent webhooks
+        # GoWA may send multiple webhooks for the same message (e.g., type=other then type=message.text)
+        is_actionable_event = event_type in ("message.text", "message.image")
+
         logger.info(
             f"Webhook received: type={event_type}, from={sender} ({sender_jid})"
         )
@@ -234,15 +239,16 @@ async def handle_webhook(request: Request) -> dict:
             logger.debug(f"Skipping own message: {message_id}")
             return {"status": "ok"}
 
-        # Skip if we've already processed this message (prevent duplicate processing)
-        if message_id and message_id in processed_message_ids:
-            logger.debug(f"Skipping already processed message: {message_id}")
-            return {"status": "ok"}
-
-        # Mark message as being processed IMMEDIATELY to prevent duplicate processing on timeout
-        if message_id:
-            processed_message_ids[message_id] = time.time()
-            logger.debug(f"Marked message {message_id} as processed")
+        # Skip duplicate processing - only check for actionable event types
+        # Use lock to prevent TOCTOU race condition between concurrent webhooks
+        if message_id and is_actionable_event:
+            async with processed_message_lock:
+                if message_id in processed_message_ids:
+                    logger.debug(f"Skipping already processed message: {message_id}")
+                    return {"status": "ok"}
+                # Mark message as being processed IMMEDIATELY
+                processed_message_ids[message_id] = time.time()
+                logger.debug(f"Marked message {message_id} as processed")
 
         # Debug: log payload structure (not content to avoid PII)
         logger.debug(f"Webhook payload keys: {list(payload.keys())}")
@@ -294,6 +300,11 @@ async def handle_webhook(request: Request) -> dict:
                 should_process = True
                 logger.info(
                     f"Reply Agent triggered by reply to Akasha from {sender}: {query}"
+                )
+            elif "akasha" in message_text.lower():
+                # Debug: log near-miss trigger attempts for diagnostics
+                logger.debug(
+                    f"Message contained 'akasha' but didn't trigger: {message_text[:80]!r}"
                 )
 
             if should_process:
