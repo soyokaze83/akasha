@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     whatsapp_recipients: str = ""
 
     # Mandarin Generator - Topic Selection Mode
-    # Options: "free" (LLM freely chooses), "web_search" (use today's news)
+    # Options: "free" (LLM freely chooses), "hackernews" (use HN top stories)
     topic_selection_mode: str = "free"
 
     # Scheduler Configuration
@@ -70,11 +70,6 @@ class Settings(BaseSettings):
 
     # Concurrency Configuration
     max_concurrent_sends: int = 5  # Max parallel message sends
-
-    # Qdrant Vector Store Configuration
-    qdrant_url: str = "http://qdrant:6333"
-    topic_similarity_threshold: float = 0.85
-    gemini_embedding_model: str = "gemini-embedding-001"
 
     # Chat Summarizer Configuration
     chat_summarizer_enabled: bool = True

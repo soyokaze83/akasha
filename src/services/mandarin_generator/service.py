@@ -1,6 +1,7 @@
 """Mandarin passage generation service."""
 
 import logging
+import random
 import re
 from datetime import date
 from typing import Optional
@@ -125,84 +126,44 @@ class PassageGeneratorService:
         # Fallback: hard truncate if no sentence boundary found
         return passage[:max_chars]
 
-    async def _fetch_web_search_results(self) -> tuple[Optional[list[dict]], Optional[str]]:
-        """
-        Fetch web search results for topic selection.
+    async def _fetch_hackernews_content(self) -> tuple[Optional[str], Optional[str]]:
+        """Fetch page content from a random top HackerNews story.
+
+        Fetches the top 5 HN stories with URLs, shuffles them for variety,
+        and tries each one until a page fetch succeeds.
 
         Returns:
-            Tuple of (results_list, failure_reason) - one will be None
+            Tuple of (page_content, source_url) or (None, None) if all fail.
         """
-        from src.services.reply_agent.tools import web_search_tool
+        from src.utils.web_scraper import fetch_hackernews_top_stories, fetch_page_text
 
-        search_query = "今日新闻 有趣的话题"
-        logger.info(f"Searching for topics with query: {search_query}")
+        stories = await fetch_hackernews_top_stories(count=5)
 
-        results = await web_search_tool.search(search_query, num_results=5)
+        if not stories:
+            logger.warning("Failed to fetch HackerNews top stories")
+            return None, None
 
-        if not results:
-            return None, "No search results returned"
+        # Shuffle for natural variety — different story each invocation
+        random.shuffle(stories)
 
-        return results, None
+        for story in stories:
+            title = story.get("title", "")
+            url = story.get("url", "")
+            logger.info(f"Trying HN story: {title}")
 
-    async def _select_unique_topic(
-        self, results: list[dict]
-    ) -> tuple[Optional[str], Optional[str]]:
-        """
-        Select a topic from search results that is not too similar to past topics.
+            page_content = await fetch_page_text(url)
 
-        Iterates through results, fetches page content, and checks similarity
-        against the Qdrant vector store. Returns the first result that passes
-        the threshold check.
+            if page_content:
+                # Limit to first 2000 characters
+                if len(page_content) > 2000:
+                    page_content = page_content[:2000]
 
-        Args:
-            results: List of search result dicts with 'title', 'link', 'snippet'
+                logger.info(f"Selected HN story: {title} ({len(page_content)} chars)")
+                return page_content, url
 
-        Returns:
-            Tuple of (page_content, source_url) or (None, None) if all fail
-        """
-        from src.core.vector_store import topic_vector_store
-        from src.utils.web_scraper import fetch_page_text
+            logger.warning(f"Failed to fetch content from {url}, trying next story")
 
-        best_candidate: Optional[tuple[str, str, float]] = None  # (content, url, score)
-
-        for result in results:
-            title = result.get("title", "")
-            link = result.get("link", "")
-            logger.info(f"Trying topic source: {title}")
-
-            page_content = await fetch_page_text(link)
-
-            # Limit to first 2000 characters
-            if page_content and len(page_content) > 2000:
-                page_content = page_content[:2000]
-
-            if not page_content:
-                # Fall back to snippet if page fetch fails
-                page_content = result.get("snippet", "")
-
-            if not page_content:
-                logger.warning(f"No content available from {link}, skipping")
-                continue
-
-            is_similar, score = await topic_vector_store.is_similar(page_content)
-
-            if not is_similar:
-                logger.info(f"Selected unique topic from: {title} (score={score:.4f})")
-                return page_content, link
-
-            # Track the least similar candidate as fallback
-            if best_candidate is None or score < best_candidate[2]:
-                best_candidate = (page_content, link, score)
-
-            logger.info(f"Topic too similar (score={score:.4f}), trying next result")
-
-        # All results were similar - use the least similar one
-        if best_candidate:
-            logger.warning(
-                f"All results similar, using least similar (score={best_candidate[2]:.4f})"
-            )
-            return best_candidate[0], best_candidate[1]
-
+        logger.warning("All HN story page fetches failed")
         return None, None
 
     async def _generate_passage_from_web_content(
@@ -296,39 +257,19 @@ class PassageGeneratorService:
             passage = passage.strip()
             display_topic = topic
 
-        elif settings.topic_selection_mode == "web_search":
-            # Web search mode: fetch results, check similarity, generate
-            results, failure_reason = await self._fetch_web_search_results()
+        elif settings.topic_selection_mode == "hackernews":
+            # HackerNews mode: fetch top story content, generate passage
+            page_content, source_url = await self._fetch_hackernews_content()
 
-            if results:
-                page_content, source_url = await self._select_unique_topic(results)
-
-                if page_content:
-                    passage, extracted_topic = await self._generate_passage_from_web_content(
-                        page_content
-                    )
-                    display_topic = f"网络话题: {extracted_topic}"
-
-                    # Store the used content embedding for future deduplication
-                    from src.core.vector_store import topic_vector_store
-
-                    await topic_vector_store.store(
-                        text=page_content,
-                        metadata={
-                            "topic": extracted_topic,
-                            "date": date.today().isoformat(),
-                            "source_url": source_url or "",
-                        },
-                    )
-                else:
-                    logger.warning("No usable content from search results, falling back to free topic")
-                    passage, display_topic = await self._generate_free_topic_passage()
-                    display_topic = "自由话题 (无可用搜索内容)"
+            if page_content:
+                passage, extracted_topic = await self._generate_passage_from_web_content(
+                    page_content
+                )
+                display_topic = f"HN话题: {extracted_topic}"
             else:
-                # Fallback to free topic if web search fails
-                logger.warning(f"Web search failed: {failure_reason}, falling back to free topic mode")
+                logger.warning("No usable content from HackerNews, falling back to free topic")
                 passage, display_topic = await self._generate_free_topic_passage()
-                display_topic = f"自由话题 (搜索失败: {failure_reason})"
+                display_topic = "自由话题 (HackerNews获取失败)"
         else:
             # Free topic mode
             passage, display_topic = await self._generate_free_topic_passage()
