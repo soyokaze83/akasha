@@ -4,90 +4,90 @@
 
 ## Project Overview
 
-Akasha is a multi-service WhatsApp platform built as a FastAPI application that connects to WhatsApp via GoWA (Go WhatsApp Web Multi-device). It provides three services to WhatsApp users: daily Mandarin Chinese reading passages for HSK 3-4 learners, an AI-powered reply agent triggered by conversational commands, and a chat summarization tool. The platform is designed for personal/small-group use, deployed via Docker Compose with GoWA as the WhatsApp bridge.
+Akasha is a multi-service WhatsApp platform built with FastAPI that integrates with WhatsApp via GoWA (go-whatsapp-web-multidevice). It provides three services: daily Mandarin reading passage generation, an AI-powered reply agent with tool calling, and chat summarization. It connects to WhatsApp through a self-hosted GoWA Docker container and uses LLM providers (Gemini, OpenAI, OpenRouter) for text generation.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Docker Compose                    │
-│                                                     │
-│  ┌──────────────┐    webhook     ┌───────────────┐  │
-│  │   GoWA v7.9  │──────────────▶│    Akasha      │  │
-│  │  (WhatsApp)  │◀──────────────│  (FastAPI)     │  │
-│  │  port 3000   │  send/message │  port 8080     │  │
-│  └──────────────┘               │                │  │
-│         │                       │  ┌───────────┐ │  │
-│         │                       │  │ Mandarin  │ │  │
-│    WhatsApp Web                 │  │ Generator │ │  │
-│    Multi-device                 │  ├───────────┤ │  │
-│                                 │  │ Reply     │ │  │
-│                                 │  │ Agent     │ │  │
-│                                 │  ├───────────┤ │  │
-│                                 │  │ Chat      │ │  │
-│                                 │  │Summarizer │ │  │
-│                                 │  └───────────┘ │  │
-│                                 └───────┬────────┘  │
-│                                         │           │
-│  ┌──────────────┐                       │           │
-│  │   Qdrant     │◀──────────────────────┘           │
-│  │ (optional)   │  topic dedup embeddings           │
-│  └──────────────┘                                   │
-└─────────────────────────────────────────────────────┘
-         │
+                         ┌──────────────────────────────────────────┐
+                         │            Akasha (FastAPI :8080)        │
+                         │                                         │
+                         │  ┌─────────────┐  ┌──────────────────┐  │
+                         │  │  Mandarin   │  │   Reply Agent    │  │
+  HackerNews API ◄───────┤  │  Generator  │  │  (tool calling)  │  │
+                         │  └─────────────┘  └──────────────────┘  │
+                         │  ┌─────────────┐  ┌──────────────────┐  │
+  Google Custom  ◄───────┤  │    Chat     │  │   LLM Layer      │  │
+  Search API             │  │ Summarizer  │  │ Gemini/OpenAI/OR │  │
+                         │  └─────────────┘  └──────────────────┘  │
+                         │         │              │                │
+                         │         └──────┬───────┘                │
+                         │                │                        │
+                         │       GoWA Client (shared)              │
+                         └────────────────┬────────────────────────┘
+                                          │ HTTP (Docker network)
+                         ┌────────────────┴────────────────────────┐
+                         │     GoWA (WhatsApp :3000)               │
+                         │  go-whatsapp-web-multidevice v7.9.0     │
+                         │  Webhook → POST /webhook on Akasha      │
+                         └─────────────────────────────────────────┘
+
     External APIs:
-    ├── Google Gemini (primary LLM + embeddings)
+    ├── Google Gemini (primary LLM)
     ├── OpenAI via OpenRouter (secondary LLM)
     ├── OpenRouter (fallback LLM, text-only)
-    └── Google Custom Search API (web search tool)
+    ├── Google Custom Search API (web search tool)
+    └── HackerNews Firebase API (topic source)
 ```
 
-FastAPI app (`src/main.py`) receives webhook POSTs from GoWA at `/webhook`, routes messages to the appropriate service, and sends replies back via GoWA's HTTP API. All LLM-dependent processing runs as `asyncio.create_task` background tasks so the webhook returns 200 immediately (within GoWA's 60s timeout).
+Two Docker services on `akasha-network`: Akasha depends_on GoWA. GoWA sends webhook callbacks to `http://akasha:8080/webhook`. All LLM-dependent processing runs as `asyncio.create_task` background tasks so the webhook returns 200 immediately.
 
 ## Services
 
 ### Mandarin Generator
 
-**Purpose:** Generates daily HSK 3-4 level Mandarin Chinese reading passages (300-500 Chinese characters) and sends them to configured recipients via WhatsApp.
+Generates daily HSK 3-4 level Mandarin reading passages (300-500 Chinese characters, simplified Chinese only, no pinyin/English).
 
 **Service class:** `PassageGeneratorService` in `src/services/mandarin_generator/service.py`
 
 **Generation modes** (controlled by `TOPIC_SELECTION_MODE` env var):
-- `"free"` — LLM freely chooses a topic from everyday categories (travel, food, tech, culture, etc.)
-- `"web_search"` — Searches `"今日新闻 有趣的话题"` via Google Custom Search, fetches page content (first 2000 chars via `fetch_page_text`), checks Qdrant for topic similarity, then generates a passage based on selected news content
-- Specific topic — When `topic` param is provided via API, generates about that exact topic
+- `"hackernews"` — Fetches top 5 HN stories via `fetch_hackernews_top_stories(count=5)` from `src/utils/web_scraper.py`, shuffles with `random.shuffle()` for variety, tries each story's URL via `fetch_page_text()` until one succeeds (content truncated to 2000 chars). Generates passage using `_generate_passage_from_web_content()` with `WEB_SEARCH_SYSTEM_INSTRUCTION`. Topic extracted via `【话题：XXX】` regex pattern (`r"【话题[：:]\s*(.+?)】"`). Fallback topic: `"网络话题"`. Falls back to free topic mode if all HN stories fail.
+- `"free"` — LLM freely chooses a topic from everyday categories (travel, food, tech, culture, etc.) via `_generate_free_topic_passage()` with `SYSTEM_INSTRUCTION`.
+- Specific topic — When `topic` param is provided via API, generates about that exact topic.
 
-**Topic deduplication:** In `web_search` mode, each search result's page content is embedded via `gemini-embedding-001` (3072 dimensions) and compared against stored embeddings in Qdrant collection `"mandarin_topics"` using cosine similarity. Threshold: `topic_similarity_threshold` (default `0.85`). The least-similar result is used as fallback if all exceed threshold. After generation, the used content embedding is stored for future dedup.
+**HackerNews integration** (`_fetch_hackernews_content()`):
+1. `fetch_hackernews_top_stories(count=5)` — GETs `https://hacker-news.firebaseio.com/v0/topstories.json`, fetches details for first 15 IDs in parallel via `asyncio.gather`, filters for `type == "story"` with `url` field, returns first 5.
+2. Stories shuffled with `random.shuffle()` — HN front page rotates daily, randomization provides natural variety.
+3. For each story: fetch page content via `fetch_page_text()`, truncate to 2000 chars, return on success.
+4. All failures: fall back to free topic mode with display topic `"自由话题 (HackerNews获取失败)"`.
 
-**Passage validation:** `_validate_and_fix_length()` counts Chinese characters (Unicode range `\u4e00`-`\u9fff`). Min: 250 chars, Max: 600 chars. Truncates at Chinese sentence boundaries (`。！？`) if too long.
+**Passage validation:** `_validate_and_fix_length()` counts Chinese characters (Unicode range `\u4e00`-`\u9fff`). `MIN_LENGTH = 250`, `MAX_LENGTH = 600`. Truncates at Chinese sentence boundaries (`。！？`) via `_truncate_at_sentence()`.
 
-**System instructions:** Two variants — `SYSTEM_INSTRUCTION` (free/specific mode) and `WEB_SEARCH_SYSTEM_INSTRUCTION` (web_search mode). Both enforce HSK 3-4 vocabulary, simplified Chinese only, no pinyin/English, 300-500 characters. Web search variant adds rules for adapting news content.
-
-**Temperature:** `0.9` (creative, varied writing for educational freshness)
-
-**Topic extraction:** Web search mode uses `【话题：XXX】` marker pattern in the combined prompt. Extracted via regex `r"【话题[：:]\s*(.+?)】"`. Fallback topic: `"网络话题"`.
-
-**Message format:** Header `"📚 每日中文阅读 - {YYYY年MM月DD日}"` followed by passage content.
+**Key constants:**
+- `GENERATION_TEMPERATURE = 0.9` (creative, varied writing)
+- `MESSAGE_HEADER_TEMPLATE = "📚 每日中文阅读 - {date}"` (date format: `YYYY年MM月DD日`)
 
 **Scheduling:** APScheduler `CronTrigger` at `daily_passage_hour:daily_passage_minute` (default `07:00`) in configured timezone (default `Asia/Jakarta`). Manual trigger via `POST /mandarin/trigger-daily`.
 
-**Idempotency:** `sent_recipients` dict tracks daily sends keyed by `"daily_passage_{YYYY-MM-DD}"`. Prevents duplicate sends on scheduler retries. `force=True` bypasses this check.
+**Idempotency:** `sent_recipients` dict tracks daily sends keyed by `"daily_passage_{YYYY-MM-DD}"`. Prevents duplicate sends on scheduler retries. `force=True` bypasses this check. `cleanup_sent_recipients(days_to_keep=7)` removes old entries.
 
 **Concurrent sending:** Uses `asyncio.Semaphore(max_concurrent_sends)` (default 5) with `asyncio.gather` for parallel delivery to multiple recipients.
 
+**Singleton:** `passage_generator = PassageGeneratorService()`
+
 ### Reply Agent
 
-**Purpose:** AI-powered conversational assistant available via WhatsApp, capable of web search and multimodal (image) understanding.
+AI-powered conversational assistant available via WhatsApp, capable of web search and multimodal (image) understanding.
 
 **Service class:** `ReplyAgentService` in `src/services/reply_agent/service.py`
 
-**Trigger mechanisms:**
-1. **Prefix trigger:** Message starts with `"hey akasha,"` (case-insensitive) — query is text after prefix
-2. **Reply-to-Akasha:** User replies to any message previously sent by Akasha — full message text is the query (no prefix needed)
-3. **Image with caption:** Image sent with caption starting with `"hey akasha,"` — query is caption text after prefix
-4. **Image reply-to-Akasha:** Image sent as reply to Akasha's message — caption or default `"What is in this image?"`
+**Trigger mechanisms** (detected in `main.py` webhook handler):
+1. **Prefix trigger:** Message starts with `"hey akasha,"` (case-insensitive) — `TRIGGER_PHRASE = "hey akasha,"`
+2. **Reply-to-Akasha:** User replies to any message previously sent by Akasha (replied_id found in `akasha_message_ids`)
+3. **Image with caption:** Image sent with caption starting with trigger phrase
+4. **Image reply-to-Akasha:** Image sent as reply to Akasha's message — caption or default query used
 
-**System instruction:** `REALISTIC_SYSTEM_INSTRUCTION` — Akasha is a casual, witty, approachable WhatsApp friend. No corporate tone. Can swear. Responds in user's language. Told to search immediately without announcing it. Under 500 words unless more detail requested.
+**System instruction:** `REALISTIC_SYSTEM_INSTRUCTION` — Akasha is a casual, witty, approachable WhatsApp friend. No corporate tone. Responds in user's language. Told to search immediately without announcing it. Under 500 words unless more detail requested.
 
 **Tool calling orchestration loop:**
 - State machine with `ResponseState` enum: `NEEDS_TOOL_CALL`, `INTERMEDIARY`, `FINAL_ANSWER`
@@ -96,7 +96,7 @@ FastAPI app (`src/main.py`) receives webhook POSTs from GoWA at `/webhook`, rout
 - On `INTERMEDIARY` state, re-prompts with: `"Don't tell me what you're going to do - just do it and give me the answer directly."`
 - On max iterations, makes one final call without tools
 
-**DSPy intermediary classification:** `IntermediaryClassifier` signature classifies response text (truncated to 500 chars) as `"yes"` or `"no"` intermediary. Uses `dspy.Predict` with Gemini at `temperature=0.0`. Falls back to OpenRouter DSPy LM if Gemini hits 429/503/quota errors. Defaults to `FINAL_ANSWER` if both fail.
+**DSPy intermediary classification:** `IntermediaryClassifier` signature classifies response text (truncated to 500 chars) as `"yes"` or `"no"` intermediary. Uses `dspy.ChainOfThought` with Gemini at `temperature=0.0`. Falls back to OpenRouter DSPy LM if Gemini hits 429/503/quota errors. Defaults to `FINAL_ANSWER` if both fail.
 
 **Available tool:** `web_search` — Google Custom Search API (`WebSearchTool` in `src/services/reply_agent/tools.py`). URL: `https://www.googleapis.com/customsearch/v1`. Returns up to 10 results with `title`, `link`, `snippet`. Timeout: 10s.
 
@@ -105,32 +105,37 @@ FastAPI app (`src/main.py`) receives webhook POSTs from GoWA at `/webhook`, rout
 - `_process_with_openai()` — OpenAI-compatible API (via OpenRouter base URL). Multimodal via base64-encoded `image_url`. Timeout: 45s.
 - `_process_with_openrouter()` — Text-only fallback. Same OpenAI-compatible format with dedicated OpenRouter credentials. No vision support.
 
-**Provider fallback chain:** Primary provider (from `llm_provider` setting) → OpenRouter fallback. Fallback triggers on: `429`, `503`, `500`, quota, rate, exhausted, api_key_invalid, api key expired, invalid_argument, unavailable, overload, internal error. Image data is stripped for OpenRouter fallback since it's text-only.
+**Provider fallback chain:** Primary provider (from `llm_provider` setting) → OpenRouter fallback. Fallback triggers on: `429`, `503`, `500`, quota, rate, exhausted, api_key_invalid, api key expired, invalid_argument, unavailable, overload, internal error. Image data stripped for OpenRouter fallback (text-only). Requires `settings.llm_fallback_enabled = True` and `openrouter_api_key` configured.
 
-**Multimodal support:** Gemini uses `Part.from_bytes(data, mime_type)`. OpenAI uses base64-encoded data URL in `image_url` content type. Images are downloaded from GoWA via a three-step fallback chain: (1) webhook `file_path` field, (2) cached `media_file_paths` dict, (3) on-demand `download_media` API.
+**Multimodal support:** Gemini uses `Part.from_bytes(data, mime_type)`. OpenAI uses base64-encoded data URL in `image_url` content type. Images downloaded from GoWA via three-step fallback: (1) webhook `file_path` field, (2) cached `media_file_paths` dict, (3) on-demand `download_media` API.
 
-**Quoted message context:** When replying to a message, the quoted text is prepended to the prompt in a delimited block: `"The user is replying to this message:\n---\n{quoted_context}\n---\n\nUser's question/comment: {query}"`.
+**Quoted message context:** Quoted text prepended as: `"The user is replying to this message:\n---\n{quoted_context}\n---\n\nUser's question/comment: {query}"`.
+
+**Singleton:** `reply_agent = ReplyAgentService()`
 
 ### Chat Summarizer
 
-**Purpose:** Summarizes recent chat messages when triggered by a specific command pattern in WhatsApp.
+Summarizes recent chat messages when triggered by a specific command pattern in WhatsApp.
 
 **Service class:** `ChatSummarizerService` in `src/services/chat_summarizer/service.py`
 
-**Trigger pattern:** Regex `r"^akasha,\s*summarize\s+the\s+previous\s+(\d+)\s+messages?\s*[.!?]*\s*$"` (case-insensitive). Example: `"akasha, summarize the previous 50 messages"`. Extracts the number of messages from capture group.
+**Trigger pattern:** `TRIGGER_PATTERN = re.compile(r"^akasha,\s*summarize\s+the\s+previous\s+(\d+)\s+messages?\s*[.!?]*\s*$", re.IGNORECASE)`
+Example: `"akasha, summarize the previous 50 messages"`
 
 **Max messages:** Capped at `chat_summarizer_max_messages` (default 200).
 
-**Display name resolution:** `_resolve_display_name()` resolves sender JIDs to human-readable names:
+**Display name resolution** (`_resolve_display_name()`):
 - Standard JID (`@s.whatsapp.net`) — calls GoWA `/user/info` API, uses `verified_name` field, falls back to phone number
 - LID format (`@lid`) — cannot be resolved via API, uses `"User {last 4 digits}"` pattern
 - Results cached in per-request `name_cache` dict to avoid redundant API calls
 
-**Language auto-detection:** Summary prompt instructs LLM to write in the same language as the original messages. No explicit detection — relies on LLM capability.
+**Language auto-detection:** Summary prompt instructs LLM to write in the same language as the original messages. Relies on LLM capability.
 
 **Temperature:** `0.3` (factual summarization, low creativity)
 
 **Output format:** `"*Chat Summary* ({N} messages)\n\n{summary}\n\n*Participants:* {sorted names}"` (WhatsApp bold formatting).
+
+**Singleton:** `chat_summarizer = ChatSummarizerService()`
 
 ## Core Infrastructure
 
@@ -138,25 +143,35 @@ FastAPI app (`src/main.py`) receives webhook POSTs from GoWA at `/webhook`, rout
 
 `Settings` class in `src/core/config.py` extends `pydantic_settings.BaseSettings`. Loads from `.env` file (case-insensitive, extra fields ignored).
 
-Key properties:
+Key computed properties:
 - `gemini_api_keys` — Parses comma-separated `GEMINI_API_KEY` into list for key rotation
 - `recipients_list` — Parses comma-separated `WHATSAPP_RECIPIENTS` into JID list
 
-Notable defaults: `llm_provider="gemini"`, `gemini_model="gemini-2.0-flash"`, `openai_model="gpt-4o-mini"`, `openrouter_model="xiaomi/mimo-v2-flash:free"`, `rate_limit_requests=10` per 60s window, `max_concurrent_sends=5`, `topic_similarity_threshold=0.85`, `gemini_embedding_model="gemini-embedding-001"`.
+Notable defaults: `llm_provider="gemini"`, `gemini_model="gemini-2.0-flash"`, `openai_model="gpt-4o-mini"`, `openrouter_model="xiaomi/mimo-v2-flash:free"`, `rate_limit_requests=10` per 60s window, `max_concurrent_sends=5`, `topic_selection_mode="free"`.
 
 ### GoWA Client
 
 `GowaClient` in `src/core/gowa/client.py` — async HTTP client wrapping GoWA's REST API using `httpx.AsyncClient` with basic auth. Timeout: 30s.
 
-**Methods:**
-- `send_message(phone, message, reply_message_id)` — POST `/send/message`. Retry: 3 attempts, exponential backoff (2-10s). Retries on `HTTPStatusError` and `ConnectError`.
-- `check_health()` — GET `/app/devices`, returns bool.
-- `download_media(message_id, phone)` — GET `/message/{id}/download`. Retry: 2 attempts, 1s wait. Handles JSON response for auto-downloaded media (extracts file path from `"Media downloaded successfully to {path}"` message, then fetches from static path).
-- `download_media_from_path(file_path)` — GET `/{file_path}`. Retry: 2 attempts, 1s wait. For GoWA's static file server.
-- `get_chat_messages(chat_jid, limit)` — Paginated fetch via GET `/chat/{jid}/messages`. Page size: `GOWA_MAX_MESSAGES_LIMIT = 100`. Retry: 2 attempts, 1s wait.
-- `get_user_info(phone_jid)` — GET `/user/info`. Retry: 2 attempts, 1s wait. Returns `verified_name`, `status`, `picture_id`.
+**Methods and retry logic** (all use tenacity):
+| Method | Attempts | Backoff | Triggers |
+|--------|----------|---------|----------|
+| `send_message(phone, message, reply_message_id)` | 3 | Exponential 2-10s | HTTPStatusError, ConnectError |
+| `download_media(message_id, phone)` | 2 | Fixed 1s | HTTPStatusError, ConnectError |
+| `download_media_from_path(file_path)` | 2 | Fixed 1s | HTTPStatusError, ConnectError |
+| `get_chat_messages(chat_jid, limit)` | 2 | Fixed 1s | HTTPStatusError, ConnectError |
+| `get_user_info(phone_jid)` | 2 | Fixed 1s | HTTPStatusError, ConnectError |
 
-Singleton: `gowa_client = GowaClient()`
+**Media download fallback chain** (in `main.py` webhook handler):
+1. `file_path` from webhook payload (auto-downloaded by GoWA) → `download_media_from_path()`
+2. Cached path from `media_file_paths` dict → `download_media_from_path()`
+3. On-demand API download → `download_media(message_id, phone)`
+
+**Pagination:** `get_chat_messages()` handles limits > `GOWA_MAX_MESSAGES_LIMIT` (100) by calling `_fetch_chat_messages_page()` with offset increments.
+
+**Custom exception:** `GowaClientError` raised on non-SUCCESS response codes.
+
+**Singleton:** `gowa_client = GowaClient()`
 
 ### Webhook Processing
 
@@ -166,9 +181,9 @@ Singleton: `gowa_client = GowaClient()`
 2. **Rate limiting:** `rate_limiter.is_allowed(sender_jid)` — returns 429 if exceeded.
 3. **Message extraction:** Handles two payload formats — media messages (ID at top level `payload["id"]`) and text messages (ID in `payload["message"]["id"]`).
 4. **Event type detection:** `reaction`, `message.image`, `message.text`, or `other` based on payload structure.
-5. **Own message skip:** Checks `message_id` against `akasha_message_ids` dict (populated when Akasha sends messages).
-6. **Duplicate deduplication:** `processed_message_ids` dict with `asyncio.Lock` to prevent TOCTOU race conditions. Only checked for actionable events (`message.text`, `message.image`). Message marked as processed immediately inside lock.
-7. **Media path caching:** `media_file_paths` dict stores `{message_id: (file_path, timestamp)}` from webhook `file_path` field for later image download.
+5. **Own message skip:** Checks `message_id` against `akasha_message_ids` dict.
+6. **Duplicate deduplication:** `processed_message_ids` dict with `asyncio.Lock` (`processed_message_lock`) to prevent TOCTOU race conditions. Message marked as processed immediately inside lock.
+7. **Media path caching:** `media_file_paths` dict stores `{message_id: (file_path, timestamp)}` for later image download.
 8. **Service routing:** Reply Agent checked first (trigger phrase or reply-to-Akasha), then Chat Summarizer (trigger pattern), then image Reply Agent.
 9. **Background dispatch:** `asyncio.create_task()` for all LLM processing. Webhook returns `{"status": "ok"}` immediately.
 10. **Lazy cleanup:** `cleanup_old_message_ids()` called on each webhook to remove entries older than `MESSAGE_ID_TTL = 86400` (24 hours) from all three dicts.
@@ -179,11 +194,12 @@ Singleton: `gowa_client = GowaClient()`
 
 `AsyncIOScheduler` from APScheduler in `src/core/scheduler.py`. Timezone: `settings.timezone` (default `Asia/Jakarta`).
 
-Jobs:
-- `daily_mandarin_passage` — `CronTrigger` at configured hour/minute, calls `send_daily_passage()`
-- `cache_cleanup` — `IntervalTrigger` every 30 minutes, calls `_cleanup_caches()` which runs `cleanup_old_message_ids()` and `rate_limiter.cleanup()`
+| Job ID | Trigger | Function |
+|--------|---------|----------|
+| `daily_mandarin_passage` | CronTrigger(hour, minute, tz) | `send_daily_passage` |
+| `cache_cleanup` | IntervalTrigger(minutes=30) | `_cleanup_caches()` |
 
-Started/stopped via `lifespan` context manager in FastAPI app.
+Cleanup targets: `cleanup_old_message_ids()` (all 3 caches in main.py) + `rate_limiter.cleanup()`. Started/stopped via `lifespan` context manager in FastAPI app.
 
 ### Rate Limiter
 
@@ -191,27 +207,13 @@ Started/stopped via `lifespan` context manager in FastAPI app.
 
 `cleanup()` removes senders with no valid timestamps. Called by scheduler every 30 minutes.
 
-Singleton: `rate_limiter = RateLimiter()`
-
-### Vector Store
-
-`TopicVectorStore` in `src/core/vector_store.py` — Qdrant integration for Mandarin topic deduplication.
-
-- Collection: `"mandarin_topics"`, cosine distance, 3072 dimensions (matching `gemini-embedding-001` output)
-- Lazy client initialization via `AsyncQdrantClient(url=settings.qdrant_url)`
-- `_ensure_collection()` creates collection on first use, recreates if dimension mismatch detected
-- `_embed(text)` uses `gemini_key_rotator.get_client()` for embedding via `aio.models.embed_content`
-- `is_similar(text)` returns `(bool, float)` — queries top-1 nearest neighbor, compares against `topic_similarity_threshold`
-- `store(text, metadata)` upserts point with UUID, stores metadata (topic, date, source_url)
-- All operations wrapped in try/except — failures are logged as warnings and don't block generation
-
-Singleton: `topic_vector_store = TopicVectorStore()`
+**Singleton:** `rate_limiter = RateLimiter()`
 
 ## LLM Layer
 
 ### Provider Abstraction
 
-`LLMClient` Protocol in `src/llm/base.py` defines the interface:
+`LLMClient` Protocol in `src/llm/base.py`:
 ```python
 async def generate_content(
     self, prompt: str, system_instruction: Optional[str] = None,
@@ -220,18 +222,19 @@ async def generate_content(
 ) -> str
 ```
 
-`get_llm_client()` factory returns `gemini_client` or `openai_client` based on `llm_provider` setting. `get_configured_llm()` wraps it as a lazy-loaded singleton (`_llm_client`).
+`get_llm_client()` factory returns `gemini_client` or `openai_client` based on `llm_provider` setting. `get_configured_llm()` wraps it as a lazy-loaded singleton.
 
 ### Gemini Client
 
-`GeminiClient` in `src/llm/gemini.py` — uses `google.genai` SDK with automatic key rotation.
+`GeminiClient` in `src/llm/gemini.py` — uses `google.genai` SDK with automatic key rotation via `GeminiKeyRotator`.
 
 - Multimodal content built as `[Part.from_bytes(image), Part.from_text(prompt)]` wrapped in `Content(role="user")`
 - Key rotation: tries each key once. On rotatable errors, calls `self._rotator.rotate()` and retries.
 - **Rotation triggers:** `429`, `quota`, `rate`, `exhausted`, `all api keys`, `api_key_invalid`, `api key expired`, `invalid_argument`, `invalid api key`, `503`, `500`, `unavailable`, `overload`, `overloaded`, `internal error`, `temporarily unavailable`
 - Non-rotatable errors re-raised immediately
+- `response.text or ""` — handles None responses from blocked/empty generations
 
-Singleton: `gemini_client = GeminiClient()`
+**Singleton:** `gemini_client = GeminiClient()`
 
 ### OpenAI Client
 
@@ -241,19 +244,19 @@ Singleton: `gemini_client = GeminiClient()`
 - Lazy client initialization
 - Multimodal: base64 encodes image as `data:{mime_type};base64,{data}` in `image_url` content block
 - Default `max_output_tokens`: 2000
+- `content or ""` — handles None responses
 
-Singleton: `openai_client = OpenAIClient()`
+**Singleton:** `openai_client = OpenAIClient()`
 
 ### OpenRouter Client
 
 `OpenRouterClient` in `src/llm/openrouter.py` — text-only fallback, no vision support.
 
 - **Base URL:** `https://openrouter.ai/api/v1`
-- Logs warning if `image_data` is provided (will be ignored)
-- Uses dedicated `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` settings
+- Logs warning if `image_data` is provided (ignored)
 - Default model: `xiaomi/mimo-v2-flash:free`
 
-Singleton: `openrouter_client = OpenRouterClient()`
+**Singleton:** `openrouter_client = OpenRouterClient()`
 
 ### Key Rotator
 
@@ -265,7 +268,15 @@ Singleton: `openrouter_client = OpenRouterClient()`
 - `get_client()` returns cached client for current key
 - `get_next_client()` rotates then returns client
 
-Singleton: `gemini_key_rotator = GeminiKeyRotator()`
+**Singleton:** `gemini_key_rotator = GeminiKeyRotator()`
+
+### Fallback Chain
+
+In `ReplyAgentService.process_query()`:
+1. Primary provider (`settings.llm_provider`) with full orchestration loop
+2. On 429/503/quota/rate/API key/unavailable/overload errors → OpenRouter fallback
+3. Image data stripped for OpenRouter (text-only)
+4. Requires `settings.llm_fallback_enabled = True` and `openrouter_api_key` configured
 
 ## API Endpoints
 
@@ -289,48 +300,43 @@ Singleton: `gemini_key_rotator = GeminiKeyRotator()`
 4. **Extract message data** — parse payload for text/media content, message ID, reply context
 5. **Detect event type** — classify as `reaction`, `message.image`, `message.text`, or `other`
 6. **Skip own messages** — check `message_id` against `akasha_message_ids`
-7. **Deduplicate** — acquire `processed_message_lock`, check/mark `processed_message_ids` for actionable events
+7. **Deduplicate** — acquire `processed_message_lock`, check/mark `processed_message_ids`
 8. **Cache media paths** — store `file_path` from payload for later image downloads
 9. **Lazy cleanup** — remove entries older than 24h from tracking dicts
-10. **Route to service:**
-    - Reply Agent: trigger phrase match (`"hey akasha,"`) or reply-to-Akasha → download quoted images if applicable → `asyncio.create_task(process_text_reply_background(...))`
-    - Chat Summarizer: trigger pattern match → `asyncio.create_task(process_chat_summary_background(...))`
-    - Image Reply Agent: image with trigger caption or reply-to-Akasha → download image → `asyncio.create_task(process_image_reply_background(...))`
-11. **Return 200** — `{"status": "ok"}` immediately (even on processing errors, to prevent GoWA retries)
+10. **Route to service** — Reply Agent (trigger phrase or reply-to-Akasha), Chat Summarizer (trigger pattern), Image Reply Agent
+11. **Return 200** — `{"status": "ok"}` immediately
 
 ## Key Technical Patterns
 
-- **Singleton services:** All services, clients, and infrastructure components use module-level singleton instances (`reply_agent`, `chat_summarizer`, `passage_generator`, `gowa_client`, `gemini_client`, `rate_limiter`, `topic_vector_store`, `gemini_key_rotator`)
-- **Lazy initialization:** LLM clients, Qdrant client, and OpenAI/OpenRouter clients initialize on first use
+- **Singletons:** `settings`, `gowa_client`, `gemini_client`, `openai_client`, `openrouter_client`, `gemini_key_rotator`, `rate_limiter`, `passage_generator`, `reply_agent`, `chat_summarizer`, `web_search_tool`
+- **Lazy initialization:** LLM clients via `get_configured_llm()`, OpenAI/OpenRouter `AsyncOpenAI` client via property
 - **Async background tasks:** All LLM processing dispatched via `asyncio.create_task()` to avoid blocking webhook response
-- **Retry with exponential backoff:** GoWA `send_message` retries 3x with 2-10s exponential backoff via `tenacity`. Other GoWA calls retry 2x with 1s fixed wait
+- **Retry with exponential backoff:** GoWA `send_message` retries 3x with 2-10s exponential backoff via tenacity. Other GoWA calls retry 2x with 1s fixed wait
 - **Key rotation:** Gemini API keys rotate on quota/rate/server errors. Round-robin with thread-safe index. Clients cached per key
 - **Concurrent send semaphore:** `asyncio.Semaphore(max_concurrent_sends)` limits parallel WhatsApp sends (default 5)
-- **Message ID tracking with TTL cleanup:** Three in-memory dicts (`akasha_message_ids`, `processed_message_ids`, `media_file_paths`) with 24h TTL. Cleaned up lazily on each webhook + every 30 minutes via scheduler
-- **Thread-safe deduplication:** `processed_message_lock` (`asyncio.Lock`) prevents TOCTOU race between concurrent webhook calls for the same message
-- **DSPy for LLM-based classification:** `IntermediaryClassifier` signature with `dspy.Predict` at temperature 0.0 classifies response quality, with Gemini → OpenRouter fallback chain
+- **Message ID tracking with TTL cleanup:** Three in-memory dicts (`akasha_message_ids`, `processed_message_ids`, `media_file_paths`) with 24h TTL. Cleaned lazily on each webhook + every 30 minutes via scheduler
+- **Thread-safe deduplication:** `processed_message_lock` (`asyncio.Lock`) prevents TOCTOU race between concurrent webhook calls
+- **DSPy for LLM-based classification:** `IntermediaryClassifier` signature with `dspy.ChainOfThought` at temperature 0.0, with Gemini → OpenRouter fallback
 - **User-friendly error messages:** `_send_error_response()` maps error patterns (503, 429, quota, timeout, API key) to human-readable WhatsApp messages
 
 ## Deployment
 
-**Docker Compose** runs two (optionally three) services:
+**Docker Compose** runs two services on `akasha-network`:
 - `akasha` — Python FastAPI app, port 8080, depends on `whatsapp`
-- `whatsapp` — GoWA v7.9.0 (`aldinokemal2104/go-whatsapp-web-multidevice`), port 3000, webhook configured to `http://akasha:8080/webhook`, volume `whatsapp_data` for session persistence
-- Qdrant — optional, for topic deduplication (configured via `QDRANT_URL`)
+- `whatsapp` — GoWA v7.9.0 (`aldinokemal2104/go-whatsapp-web-multidevice`), port 3000, webhook to `http://akasha:8080/webhook`, Basic Auth `user1:pass1`, volume `whatsapp_data` for session persistence
 
-**Dockerfile:** `python:3.12-slim` base, `uv` for fast dependency management (`uv sync --frozen --no-dev`), exposes port 8080, runs via `uv run uvicorn src.main:app --host 0.0.0.0 --port 8080`.
+**Dockerfile:** `python:3.12-slim` base, `uv` for fast dependency management (`uv sync --frozen --no-dev`), port 8080, runs `uv run uvicorn src.main:app --host 0.0.0.0 --port 8080`. Env: `PYTHONUNBUFFERED=1`, `PYTHONDONTWRITEBYTECODE=1`.
 
 **Environment variable groups:**
-- App: `APP_NAME`, `DEBUG`, `LOG_LEVEL`
+- App: `DEBUG`, `LOG_LEVEL`
 - GoWA: `GOWA_BASE_URL`, `GOWA_USERNAME`, `GOWA_PASSWORD`, `GOWA_WEBHOOK_SECRET`
 - LLM: `LLM_PROVIDER`, `LLM_FALLBACK_ENABLED`
-- Gemini: `GEMINI_API_KEY` (comma-separated for rotation), `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL`
+- Gemini: `GEMINI_API_KEY` (comma-separated for rotation), `GEMINI_MODEL`
 - OpenAI: `OPENAI_API_KEY`, `OPENAI_MODEL`
 - OpenRouter: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`
 - Search: `GOOGLE_SEARCH_API_KEY`, `GOOGLE_SEARCH_ENGINE_ID`
 - Mandarin: `WHATSAPP_RECIPIENTS`, `TOPIC_SELECTION_MODE`, `DAILY_PASSAGE_HOUR`, `DAILY_PASSAGE_MINUTE`, `TIMEZONE`
 - Rate limiting: `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS`
 - Concurrency: `MAX_CONCURRENT_SENDS`
-- Qdrant: `QDRANT_URL`, `TOPIC_SIMILARITY_THRESHOLD`
-- Summarizer: `CHAT_SUMMARIZER_ENABLED`, `CHAT_SUMMARIZER_MAX_MESSAGES`
+- Chat Summarizer: `CHAT_SUMMARIZER_ENABLED`, `CHAT_SUMMARIZER_MAX_MESSAGES`
 - Reply Agent: `REPLY_AGENT_ENABLED`

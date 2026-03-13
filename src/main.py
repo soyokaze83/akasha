@@ -27,6 +27,7 @@ from src.core.background_tasks import (
 from src.services.mandarin_generator import router as mandarin_router
 from src.services.reply_agent import reply_agent, router as reply_agent_router
 from src.services.chat_summarizer import chat_summarizer, router as chat_summarizer_router
+from src.core.message_cache import message_cache
 
 # Setup logging first
 setup_logging()
@@ -71,6 +72,11 @@ def cleanup_old_message_ids() -> None:
         del processed_message_ids[k]
     if expired_processed:
         logger.debug(f"Cleaned up {len(expired_processed)} old processed message IDs")
+
+    # Cleanup old message cache entries
+    expired_cache = message_cache.cleanup()
+    if expired_cache:
+        logger.debug(f"Cleaned up {expired_cache} old message cache entries")
 
 
 @asynccontextmanager
@@ -272,6 +278,10 @@ async def handle_webhook(request: Request) -> dict:
         # Lazy cleanup of old message IDs
         cleanup_old_message_ids()
 
+        # Cache incoming messages for reply chain context
+        if message_id and event_type == "message.text" and message_text:
+            message_cache.store(message_id, message_text, sender, replied_id or "")
+
         # Handle Reply Agent triggers for text messages
         if (
             settings.reply_agent_enabled
@@ -287,7 +297,15 @@ async def handle_webhook(request: Request) -> dict:
             # Determine if should trigger and extract query
             should_process = False
             query = ""
-            quoted_context = quoted_message if quoted_message else None
+            quoted_context = None
+            if replied_id:
+                chain = message_cache.build_reply_chain(replied_id)
+                if chain:
+                    quoted_context = message_cache.format_chain(chain)
+                elif quoted_message:
+                    quoted_context = quoted_message
+            elif quoted_message:
+                quoted_context = quoted_message
 
             if reply_agent.should_trigger(message_text):
                 # "hey akasha, ..." - extract query after trigger phrase
@@ -463,6 +481,11 @@ async def handle_webhook(request: Request) -> dict:
             and event_type == "message.image"
             and image_info
         ):
+            # Cache image message for reply chain context
+            if message_id:
+                caption = image_info.get("caption", "")
+                message_cache.store(message_id, caption or "[Image]", sender, replied_id or "")
+
             # Get image caption and message ID for download
             image_caption = image_info.get("caption", "")
             payload_id = message_id
@@ -576,7 +599,15 @@ async def handle_webhook(request: Request) -> dict:
                         query = "What is in this image?"
 
                     # Get quoted context for image replies
-                    quoted_context = quoted_message if quoted_message else None
+                    quoted_context = None
+                    if replied_id:
+                        chain = message_cache.build_reply_chain(replied_id)
+                        if chain:
+                            quoted_context = message_cache.format_chain(chain)
+                        elif quoted_message:
+                            quoted_context = quoted_message
+                    elif quoted_message:
+                        quoted_context = quoted_message
 
                     # Process in background to avoid blocking webhook handler
                     asyncio.create_task(

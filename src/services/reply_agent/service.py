@@ -224,7 +224,11 @@ class ReplyAgentService:
         """
         # Build prompt with context if replying to a message
         if quoted_context:
-            full_prompt = f"""The user is replying to this message:
+            if "\n" in quoted_context and "]:" in quoted_context:
+                header = "The user is replying in this conversation thread:"
+            else:
+                header = "The user is replying to this message:"
+            full_prompt = f"""{header}
 ---
 {quoted_context}
 ---

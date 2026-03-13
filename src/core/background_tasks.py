@@ -6,6 +6,7 @@ import time
 from typing import Optional
 
 from src.core.gowa import gowa_client
+from src.core.message_cache import message_cache
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ async def process_text_reply_background(
         sent_message_id = result.get("message_id")
         if sent_message_id:
             akasha_message_ids[sent_message_id] = time.time()
+            message_cache.store(sent_message_id, response_text, "Akasha", replied_id=message_id)
             logger.info(f"Tracked message ID: {sent_message_id}")
         else:
             logger.warning(f"No message_id in GoWA response: {result}")
@@ -114,6 +116,7 @@ async def process_image_reply_background(
         sent_message_id = result.get("message_id")
         if sent_message_id:
             akasha_message_ids[sent_message_id] = time.time()
+            message_cache.store(sent_message_id, response_text, "Akasha", replied_id=message_id)
             logger.info(f"Tracked message ID: {sent_message_id}")
 
         total_time = time.time() - processing_start
@@ -178,6 +181,7 @@ async def _send_error_response(
         sent_message_id = error_result.get("message_id")
         if sent_message_id:
             akasha_message_ids[sent_message_id] = time.time()
+            message_cache.store(sent_message_id, error_message, "Akasha", replied_id=message_id)
     except Exception as send_error:
         logger.error(f"Failed to send error message: {send_error}")
 
@@ -226,6 +230,7 @@ async def _send_image_error_response(
         sent_message_id = error_result.get("message_id")
         if sent_message_id:
             akasha_message_ids[sent_message_id] = time.time()
+            message_cache.store(sent_message_id, error_message, "Akasha", replied_id=message_id)
     except Exception as send_error:
         logger.error(f"Failed to send error message: {send_error}")
 
@@ -282,6 +287,7 @@ async def process_chat_summary_background(
         sent_message_id = result.get("message_id")
         if sent_message_id:
             akasha_message_ids[sent_message_id] = time.time()
+            message_cache.store(sent_message_id, response_text, "Akasha", replied_id=message_id)
 
         elapsed = time.time() - start_time
         logger.info(

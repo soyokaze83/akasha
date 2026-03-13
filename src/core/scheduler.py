@@ -28,6 +28,16 @@ async def _cleanup_caches() -> None:
     except ImportError:
         logger.warning("Could not import cleanup_old_message_ids from main")
 
+    # Cleanup message cache stale entries
+    try:
+        from src.core.message_cache import message_cache
+
+        expired = message_cache.cleanup()
+        if expired:
+            logger.debug(f"Cleaned up {expired} stale message cache entries")
+    except ImportError:
+        pass
+
     # Cleanup rate limiter stale entries
     cleaned = await rate_limiter.cleanup()
     if cleaned:

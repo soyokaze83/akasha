@@ -1,6 +1,8 @@
 {
   "permissions": {
     "allow": [
+      "Edit(file_path:c:\\Users\\HP\\Projects\\akasha\\.claude/**)",
+      "Write(file_path:c:\\Users\\HP\\Projects\\akasha\\.claude/**)",
       "Bash(git -C \"c:\\\\Users\\\\Vincent Suhardi\\\\Projects\\\\akasha\" log --oneline -10)",
       "Bash(uv sync:*)",
       "Bash(uv run python:*)",

@@ -6,501 +6,357 @@ This document serves as a knowledge base for Claude and developers working on th
 
 ## Project Overview
 
-**Akasha** is a modular FastAPI platform that integrates with WhatsApp via GoWA. Each service (Mandarin Generator, Reply Agent, Chat Summarizer) lives under `src/services/` and shares a common GoWA client (`src/core/gowa/client.py`) for all WhatsApp API interactions.
+Akasha is a FastAPI platform that integrates with WhatsApp via GoWA. All WhatsApp messaging — sending, receiving, media downloads, user info lookups — flows through the shared `GowaClient` in `src/core/gowa/client.py`.
 
 ### Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Akasha (FastAPI :8080)                   │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌────────────┐  │
-│  │ Mandarin Gen.   │  │  Reply Agent    │  │    Chat    │  │
-│  │ /mandarin/*     │  │ /reply-agent/* │  │ Summarizer │  │
-│  └────────┬────────┘  └────────┬────────┘  └─────┬──────┘  │
-│           │                    │                 │          │
-│  ┌────────┴────────────────────┴─────────────────┴──────┐  │
-│  │              Shared Core (src/core/)                 │  │
-│  │  • GowaClient  • Config  • Logging  • Scheduler     │  │
-│  └──────────────────────────┬───────────────────────────┘  │
-└─────────────────────────────┼───────────────────────────────┘
-                              │ HTTP (port 3000)
-                              ▼
-┌──────────────────────────────────────────────────────────────┐
-│                   GoWA Service (Docker :3000)                 │
-│      aldinokemal2104/go-whatsapp-web-multidevice:v7.9.0      │
-│                                                              │
-│  • REST API with Basic Auth                                  │
-│  • WhatsApp Web Multi-device Protocol                        │
-│  • Webhook POST to http://akasha:8080/webhook                │
-│  • akasha-network (bridge)                                   │
-└──────────────────────────────────────────────────────────────┘
+│                      Docker Network (akasha-network)        │
+│                                                             │
+│  ┌───────────────────────────┐    webhook POST              │
+│  │   GoWA (WhatsApp)         │─────────────────────────────▶│
+│  │   :3000                   │                              │
+│  │   go-whatsapp-web v7.9.0  │◀─────────────────────────────│
+│  └───────────────────────────┘   HTTP API (send, download)  │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │   Akasha (FastAPI) :8080                              │  │
+│  │                                                       │  │
+│  │   ┌─────────────┐ ┌─────────────┐ ┌───────────────┐  │  │
+│  │   │  Mandarin   │ │   Reply     │ │    Chat       │  │  │
+│  │   │  Generator  │ │   Agent     │ │  Summarizer   │  │  │
+│  │   └──────┬──────┘ └──────┬──────┘ └───────┬───────┘  │  │
+│  │          │               │                │           │  │
+│  │          └───────────────┼────────────────┘           │  │
+│  │                          │                            │  │
+│  │                 GoWA Client (shared)                   │  │
+│  │                 src/core/gowa/client.py                │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## GoWA Service Summary
 
-**GoWA** (go-whatsapp-web-multidevice) is a Go-based WhatsApp automation tool that provides a REST API for programmatic WhatsApp interaction, web UI for manual operations, webhook support for incoming messages, and multi-device support with QR code authentication.
-
-### Docker Image
-
-```yaml
-image: aldinokemal2104/go-whatsapp-web-multidevice:v7.9.0
-```
-
-### Default Configuration
+GoWA (go-whatsapp-web-multidevice) is a Go-based REST API wrapper around the WhatsApp Web multi-device protocol. It exposes WhatsApp functionality via HTTP endpoints with Basic Auth.
 
 | Setting | Value |
 |---------|-------|
-| Port | 3000 (`APP_PORT`) |
-| Auth | Basic Auth `user1:pass1` (`APP_BASIC_AUTH`) |
-| Database | SQLite at `/app/storages/` (Docker volume `whatsapp_data`) |
-| Debug | false (`APP_DEBUG`) |
-| Auto-download media | false (`whatsapp_auto_download_media`) |
-| Account validation | true (`WHATSAPP_ACCOUNT_VALIDATION`) |
-
----
+| Docker image | `aldinokemal2104/go-whatsapp-web-multidevice:v7.9.0` |
+| Port | 3000 |
+| Auth | Basic Auth (`user1:pass1`) |
+| Storage | `/app/storages` (volume: `whatsapp_data`) |
+| Webhook URL | `http://akasha:8080/webhook` |
+| Webhook timeout | 60s |
+| Auto-download media | `false` |
 
 ## Key API Endpoints
 
-All endpoints require Basic Authentication:
-```
-Authorization: Basic base64(username:password)
-```
-
-Akasha's `GowaClient` (`src/core/gowa/client.py`) creates an `httpx.AsyncClient` with `auth=(username, password)` and `timeout=30.0` for each request.
+All endpoints require Basic Auth (`settings.gowa_username`:`settings.gowa_password`). Client timeout: 30s.
 
 ### Authentication & Device Management
 
-| Method | Endpoint | GowaClient method | Description |
-|--------|----------|-------------------|-------------|
-| GET | `/app/devices` | `check_health()`, `get_devices()` | List connected devices / verify connection |
-| GET | `/app/login` | (manual) | Get QR code image for device pairing |
+**`GET /app/devices`** — Check health and list connected devices.
 
-`check_health()` returns `True` if GET `/app/devices` returns status 200, `False` on any exception.
+Used by:
+- `GowaClient.check_health()` — Returns `True` if status 200, `False` on any exception. No retry.
+- `GowaClient.get_devices()` — Returns `data["results"]` list. No retry.
 
-`get_devices()` returns `data.get("results", [])` — list of device info dicts.
+**`GET /app/login`** — Display QR code for WhatsApp pairing (accessed via browser at `http://localhost:3000/app/login`).
 
 ### Sending Messages
 
-**POST `/send/message`** — `GowaClient.send_message(phone, message, reply_message_id)`
+**`POST /send/message`** — Send a text message.
 
-Request payload:
 ```json
+// Request payload
 {
-  "phone": "6289685028129@s.whatsapp.net",
-  "message": "Hello from Akasha!",
-  "reply_message_id": "3EB0B430B6F8F1D0E053"
+  "phone": "120363045745776185@g.us",
+  "message": "Hello world",
+  "reply_message_id": "3EB0FE05B1535BEBFD28FF"  // optional
 }
-```
 
-`reply_message_id` is included only when not `None`.
-
-Response:
-```json
+// Success response
 {
   "code": "SUCCESS",
-  "message": "Success",
+  "message": "...",
   "results": {
-    "message_id": "3EB0B430B6F8F1D0E053AC120E0A9E5C",
-    "status": "success"
+    "message_id": "3EB0FE05B1535BEBFD28FF",
+    "status": "..."
   }
 }
 ```
 
-Raises `GowaClientError` if `data.get("code") != "SUCCESS"`. Returns `data["results"]` on success.
-
-**Retry logic:**
-- `stop=stop_after_attempt(3)` — max 3 attempts
-- `wait=wait_exponential(multiplier=1, min=2, max=10)` — 2s, 4s, 8s (capped at 10s)
-- `retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError))`
+**Method:** `GowaClient.send_message(phone, message, reply_message_id=None)`
+- Retry: **3 attempts**, exponential backoff (multiplier=1, min=2s, max=10s)
+- Retries on: `httpx.HTTPStatusError`, `httpx.ConnectError`
+- Raises `GowaClientError` if `code != "SUCCESS"`
+- Returns `data["results"]` dict (contains `message_id`)
 
 ### Media Operations
 
-**GET `/message/{message_id}/download`** — `GowaClient.download_media(message_id, phone)`
+**`GET /message/{message_id}/download?phone={phone}`** — Download media from a message on-demand.
 
-```http
-GET /message/3EB0C127D7BACC83D6A3/download?phone=6289685028129@s.whatsapp.net
-```
+**Method:** `GowaClient.download_media(message_id, phone)`
+- Retry: **2 attempts**, fixed 1s wait
+- Returns `tuple[bytes, str]` (media_bytes, mime_type)
+- **JSON response edge case**: When GoWA has auto-downloaded media to disk, it returns JSON instead of binary:
+  - Message format: `"Media downloaded successfully to statics/media/..."`
+  - Client extracts file path via `message.split("downloaded successfully to ")[-1].strip()`
+  - Then calls `download_media_from_path()` to fetch the actual file
+- MIME type extracted from `Content-Type` header, stripped of charset parameters
 
-Returns binary content with `Content-Type` header. MIME type extracted by stripping charset params: `content_type.split(";")[0].strip()`.
+**`GET /{file_path}`** — Download media from GoWA's static file server.
 
-**JSON response edge case:** When `Content-Type` is `application/json`, GoWA returns either:
-1. **Error** — `{"message": "no downloadable media"}` → raises `GowaClientError`
-2. **Auto-downloaded success** — `{"message": "Media downloaded successfully to statics/media/..."}` → extracts file path from message after `"downloaded successfully to "`, then calls `download_media_from_path(file_path)` to fetch the actual binary
+**Method:** `GowaClient.download_media_from_path(file_path)`
+- Retry: **2 attempts**, fixed 1s wait
+- Returns `tuple[bytes, str]` (media_bytes, mime_type)
+- Raises `GowaClientError` if response is JSON (indicates failure)
 
-**Three-layer media download fallback** (implemented in `src/main.py` webhook handler):
+**3-layer media download fallback** (implemented in `main.py` webhook handler):
 
-1. **Webhook `file_path` field** — GoWA may include `file_path` directly in the webhook payload when auto-download is enabled. Calls `gowa_client.download_media_from_path(file_path)`.
-2. **Cached `media_file_paths` dict** — Previous image webhooks cache `{message_id: (file_path, timestamp)}`. If `replied_id in media_file_paths`, fetches from cached path.
-3. **On-demand download API** — Calls `gowa_client.download_media(message_id, phone)` as final fallback.
-
-**GET `/{file_path}`** — `GowaClient.download_media_from_path(file_path)`
-
-For GoWA's static file server (e.g., `statics/media/...`). Raises `GowaClientError` if response is JSON.
-
-**Retry logic (both media methods):**
-- `stop=stop_after_attempt(2)` — max 2 attempts
-- `wait=wait_fixed(1)` — 1 second between attempts
-- `retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError))`
+1. **Webhook `file_path`** — If the webhook payload includes `file_path` (auto-downloaded by GoWA), fetch via `download_media_from_path(file_path)`
+2. **Cached `media_file_paths`** — If a previous webhook cached the file path for this `message_id`, fetch via `download_media_from_path(cached_path)`
+3. **On-demand API** — Fall back to `download_media(message_id, phone)` which triggers GoWA to download from WhatsApp servers
 
 ### Chat Operations
 
-**GET `/chat/{chat_jid}/messages`** — `GowaClient.get_chat_messages(chat_jid, limit)`
+**`GET /chat/{chat_jid}/messages?limit={limit}&offset={offset}`** — Fetch chat message history.
 
-```http
-GET /chat/6289685028129@s.whatsapp.net/messages?limit=50&offset=0
-```
-
-Response:
-```json
-{
-  "code": "SUCCESS",
-  "results": {
-    "data": [
-      {"sender_jid": "...", "content": "...", "timestamp": "..."},
-      ...
-    ]
-  }
-}
-```
-
-**Pagination logic:** `GOWA_MAX_MESSAGES_LIMIT = 100` (constant in `client.py`).
-- If `limit <= 100`: single request via `_fetch_chat_messages_page(chat_jid, limit, offset=0)`
-- If `limit > 100`: iterates in pages of 100, accumulating results until `remaining <= 0` or a page returns fewer results than requested
-
-**Retry logic (per page):**
-- `stop=stop_after_attempt(2)` — max 2 attempts
-- `wait=wait_fixed(1)` — 1 second between attempts
-- `retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError))`
+**Method:** `GowaClient.get_chat_messages(chat_jid, limit=50)`
+- Pagination: `GOWA_MAX_MESSAGES_LIMIT = 100`. For limits > 100, makes multiple calls via `_fetch_chat_messages_page()` with incrementing offset. Stops when: empty page returned, fewer results than requested, or remaining limit reached.
+- Each page: **2 attempts**, fixed 1s wait
+- Raises `GowaClientError` if `code != "SUCCESS"`
+- Returns `results.data` list from each page, concatenated
 
 ### User Info
 
-**GET `/user/info`** — `GowaClient.get_user_info(phone_jid)`
+**`GET /user/info?phone={phone_jid}`** — Get user display name and profile info.
 
-```http
-GET /user/info?phone=6289685028129@s.whatsapp.net
-```
-
-Response fields: `verified_name`, `status`, `picture_id` (inside `results` dict). Raises `GowaClientError` if `code != "SUCCESS"`.
-
-**Retry logic:**
-- `stop=stop_after_attempt(2)` — max 2 attempts
-- `wait=wait_fixed(1)` — 1 second between attempts
-- `retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError))`
-
----
+**Method:** `GowaClient.get_user_info(phone_jid)`
+- Retry: **2 attempts**, fixed 1s wait
+- Returns dict with fields: `verified_name`, `status`, `picture_id`
+- Raises `GowaClientError` if `code != "SUCCESS"`
 
 ## Phone Number Formats (JID)
 
-### Individual Chats
-```
-{country_code}{phone_number}@s.whatsapp.net
-```
-Examples: `6289685028129@s.whatsapp.net`, `14155552671@s.whatsapp.net`
+| Format | Example | Usage |
+|--------|---------|-------|
+| Individual | `6281234567890@s.whatsapp.net` | Direct messages, API calls |
+| Group | `120363045745776185@g.us` | Group chats |
+| Group sender (compound) | `6281234567890:40@s.whatsapp.net in 120363045745776185@g.us` | Webhook `from` field for group messages |
+| Linked ID (LID) | `12345678@lid` | Some group senders, cannot be resolved via `/user/info` |
 
-### Group Chats
-```
-{group_id}@g.us
-```
-Example: `120363024512399999@g.us`
-
-### Linked ID (LID) Format
-```
-{linked_id}@lid
-```
-Cannot be resolved via `/user/info`. Chat Summarizer uses `"User {last 4 digits}"` as display name.
-
-### Group Message Sender Compound Format
-
-When receiving messages from groups, the `from` field has a compound format:
-```
-{phone}:{device_id}@s.whatsapp.net in {group_id}@g.us
-```
-Example: `6289608842518:40@s.whatsapp.net in 120363024512399999@g.us`
-
-**Parsing logic from `src/main.py`:**
+**Parsing logic** (from `main.py`):
 
 ```python
+# Extract group JID for replies
 sender_jid = payload.get("from", "")
-
-# Extract reply JID - handle group messages
-reply_jid = sender_jid
 if " in " in sender_jid:
-    # Group message - reply to the group, not the individual
-    reply_jid = sender_jid.split(" in ")[1]
+    reply_jid = sender_jid.split(" in ")[1]  # → "120363...@g.us"
 
-# For media download API, normalize phone parameter
+# Extract phone for media download (strip device ID)
 from_jid = payload.get("from") or sender_jid
 if " in " in from_jid:
     phone_for_download = from_jid.split(" in ")[1]
 else:
-    # Strip device ID if present (e.g., "6289608842518:40@s.whatsapp.net" -> "6289608842518@s.whatsapp.net")
+    # "6289608842518:40@s.whatsapp.net" → "6289608842518@s.whatsapp.net"
     phone_for_download = (
         from_jid.split(":")[0] + "@s.whatsapp.net"
         if ":" in from_jid and "@" in from_jid
         else from_jid
     )
-
-# Ensure phone has proper @s.whatsapp.net suffix
-if not phone_for_download.endswith("@s.whatsapp.net"):
-    phone_for_download = f"{phone_for_download}@s.whatsapp.net"
 ```
-
----
 
 ## Webhook Integration
 
 ### Configuration
 
-Docker-compose environment variables on GoWA service:
-```yaml
-environment:
-  - WHATSAPP_WEBHOOK=http://akasha:8080/webhook
-  - WHATSAPP_WEBHOOK_SECRET=${GOWA_WEBHOOK_SECRET:-your-secret-key}
-  - WHATSAPP_WEBHOOK_TIMEOUT=60
-```
+Docker-compose environment variables on the GoWA (`whatsapp`) service:
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `WHATSAPP_WEBHOOK` | `http://akasha:8080/webhook` | Callback URL for events |
+| `WHATSAPP_WEBHOOK_SECRET` | `${GOWA_WEBHOOK_SECRET:-your-secret-key}` | HMAC signing secret |
+| `WHATSAPP_WEBHOOK_TIMEOUT` | `60` | Timeout in seconds before GoWA retries |
+| `whatsapp_auto_download_media` | `false` | Whether GoWA auto-downloads media to disk |
 
 ### Webhook Payload Structure
 
-Pydantic models defined in `src/core/gowa/models.py`:
+**`WebhookPayload`** model (`src/core/gowa/models.py`):
 
-**`WebhookPayload`** (top-level fields):
+| Field | Type | Default | Alias | Notes |
+|-------|------|---------|-------|-------|
+| `sender_id` | `str` | `""` | — | Sender identifier |
+| `chat_id` | `str` | `""` | — | Chat identifier |
+| `from_jid` | `str` | `""` | `"from"` | Sender JID (may be compound for groups) |
+| `timestamp` | `Optional[datetime]` | `None` | — | Message timestamp |
+| `pushname` | `str` | `""` | — | Sender's WhatsApp display name |
+| `type` | `str` | `""` | — | Event type string (not used for routing) |
+| `message` | `Optional[WebhookMessage]` | `None` | — | Message content object |
 
-| Field | Type | Alias | Description |
-|-------|------|-------|-------------|
-| `sender_id` | str | — | Sender identifier |
-| `chat_id` | str | — | Chat identifier |
-| `from_jid` | str | `"from"` | Sender JID (may include group compound format) |
-| `timestamp` | Optional[datetime] | — | Message timestamp |
-| `pushname` | str | — | Sender's display name |
-| `type` | str | — | Event type string |
-| `message` | Optional[WebhookMessage] | — | Message content object |
+Model config: `populate_by_name = True` (allows both alias `"from"` and field name `from_jid`).
 
-**`WebhookMessage`** (nested in `message` field):
+**`WebhookMessage`** model:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `text` | str | Message text content |
-| `id` | str | Message ID |
-| `replied_id` | Optional[str] | ID of message being replied to |
-| `quoted_message` | Optional[str] | Text of quoted message |
-
-**Additional top-level fields** (not in Pydantic model, accessed via `payload.get()`):
-- `id` — Message ID (for media messages)
-- `image` — Image info dict (`url`, `caption`, `mime_type`)
-- `video` — Video info dict
-- `audio` — Audio info dict
-- `reaction` — Reaction info
-- `file_path` — Auto-downloaded media path
-- `replied_id` — Reply reference (for media messages)
-- `quoted_message` — Quoted text (for media messages)
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `text` | `str` | `""` | Message text content |
+| `id` | `str` | `""` | Message ID |
+| `replied_id` | `Optional[str]` | `""` | ID of message being replied to |
+| `quoted_message` | `Optional[str]` | `""` | Text of quoted message |
 
 ### Event Type Detection
 
-Akasha does **not** use the payload `type` field. Event type is determined by payload structure in `src/main.py`:
+`main.py` determines event type by payload structure, **not** the `type` field:
 
 ```python
-if payload.get("reaction"):
-    event_type = "reaction"
-elif has_image:  # isinstance(payload.get("image"), dict)
-    event_type = "message.image"
-elif message_text:  # payload.get("message", {}).get("text", "")
-    event_type = "message.text"
-else:
-    event_type = "other"
+if payload.get("reaction"):       → "reaction"
+elif has_image:                    → "message.image"    # isinstance(image_info, dict)
+elif message_text:                 → "message.text"
+else:                              → "other"
 ```
 
-Only `message.text` and `message.image` are considered "actionable events" for deduplication tracking.
+Only `"message.text"` and `"message.image"` are considered actionable events for deduplication tracking.
 
 ### Event Types Table
 
-| Event Type | Detection | Key Fields | Akasha Handling |
-|------------|-----------|------------|-----------------|
-| `reaction` | `payload.get("reaction")` truthy | `reaction` | Ignored |
-| `message.image` | `isinstance(payload.get("image"), dict)` | `image` dict, `id`, `file_path` | Reply Agent (image) |
-| `message.text` | `message.text` non-empty | `message.text`, `message.id` | Reply Agent / Chat Summarizer |
-| `other` | None of the above | — | Ignored |
+| Event Type | Detection | Additional Payload Fields |
+|------------|-----------|--------------------------|
+| `reaction` | `payload.get("reaction")` exists | `reaction` object |
+| `message.image` | `isinstance(payload.get("image"), dict)` | `image` (url, caption, mime_type), `id`, `file_path`, `replied_id`, `quoted_message` |
+| `message.text` | `message.text` is non-empty | `message` object with `text`, `id`, `replied_id`, `quoted_message` |
+| `other` | None of the above | Various (acks, presence, etc.) |
 
 ### Reply Message Fields
 
-For **text messages**, reply fields are nested inside `message`:
-```json
-{
-  "from": "6289685028129@s.whatsapp.net",
-  "pushname": "John Doe",
-  "message": {
-    "id": "3EB0C127D7BACC83D6A3",
-    "text": "Thanks for the info!",
-    "replied_id": "3EB0B430B6F8F1D0E053",
-    "quoted_message": "Here is the information you requested..."
-  }
-}
-```
+When a user replies to a message, the webhook includes:
 
-For **media messages**, reply fields are at top level:
-```json
-{
-  "id": "3EB0C127D7BACC83D6A3",
-  "from": "6289685028129@s.whatsapp.net",
-  "pushname": "John Doe",
-  "image": { "url": "...", "caption": "hey akasha, what is this?", "mime_type": "image/jpeg" },
-  "replied_id": "3EB0B430B6F8F1D0E053",
-  "quoted_message": "Previous message text...",
-  "file_path": "statics/media/..."
-}
-```
+| Field | Location | Content |
+|-------|----------|---------|
+| `replied_id` | `message.replied_id` (text) or `payload.replied_id` (media) | ID of the original message |
+| `quoted_message` | `message.quoted_message` (text) or `payload.quoted_message` (media) | Text content of quoted message |
+| `file_path` | `payload.file_path` | Path to auto-downloaded media (if applicable) |
 
 ### Image Message Webhook
 
-With `whatsapp_auto_download_media=false`, image webhooks include metadata only:
+Image messages have a different payload structure than text messages:
 
 ```json
 {
-  "id": "3EB0C127D7BACC83D6A3",
-  "from": "6289685028129@s.whatsapp.net",
-  "pushname": "John Doe",
+  "from": "6281234567890:40@s.whatsapp.net in 120363045745776185@g.us",
+  "pushname": "UserName",
+  "id": "3EB0ABC123...",
+  "type": "...",
   "image": {
-    "url": "https://mmg.whatsapp.net/...",
+    "url": "...",
     "caption": "hey akasha, what is this?",
     "mime_type": "image/jpeg"
-  }
+  },
+  "replied_id": "",
+  "quoted_message": "",
+  "file_path": ""
 }
 ```
 
-Processing flow:
-1. Receive webhook — detect as `message.image` (`isinstance(image_info, dict)`)
-2. Extract message ID from `payload.get("id")` or `payload.get("message", {}).get("id", "")`
-3. Extract caption from `image_info.get("caption", "")`
-4. Check trigger: caption starts with `"hey akasha,"` or `replied_id` is in `akasha_message_ids`
-5. Download image (3-layer fallback: webhook `file_path` → cached `media_file_paths` → on-demand API)
-6. If download fails: send error message `"I couldn't download the image. Please try sending it again."`
-7. If download succeeds: dispatch `process_image_reply_background()` task
+**Processing flow:**
+1. Webhook received — extract `id` from top-level (not `message.id`)
+2. Detect as `message.image` event
+3. Check trigger: caption starts with `"hey akasha,"` or is reply-to-Akasha
+4. Download image via 3-layer fallback (cached path → on-demand API)
+5. If no caption query, default to `"What is in this image?"`
+6. Dispatch `process_image_reply_background()` via `asyncio.create_task()`
 
 ### Signature Verification
 
-Webhooks include HMAC-SHA256 signature in header:
-```
-X-Hub-Signature-256: sha256=<hex_digest>
-```
+HMAC-SHA256 verification via `X-Hub-Signature-256` header:
 
-Verification in `src/main.py`:
 ```python
+# In main.py webhook handler
 if settings.gowa_webhook_secret and settings.gowa_webhook_secret != "your-secret-key":
     expected = "sha256=" + hmac.new(
-        settings.gowa_webhook_secret.encode(),
-        body,
-        hashlib.sha256,
+        settings.gowa_webhook_secret.encode(), body, hashlib.sha256
     ).hexdigest()
-
     if not hmac.compare_digest(signature, expected):
         raise HTTPException(status_code=401, detail="Invalid signature")
 ```
 
-Signature verification is **skipped** when `gowa_webhook_secret` is empty or equals the default `"your-secret-key"`.
-
----
+- **Skipped** when `gowa_webhook_secret` is empty or equals the default `"your-secret-key"`
+- Returns **401** on mismatch
+- Uses `hmac.compare_digest()` for timing-safe comparison
 
 ## Webhook Processing Pipeline
 
-Complete step-by-step flow from `src/main.py` `handle_webhook()`:
+Step-by-step flow from `main.py`:
 
-1. **Signature verification** — HMAC-SHA256 of raw body against `gowa_webhook_secret`. Skipped if unconfigured. Returns 401 on mismatch.
-
-2. **Rate limit check** — `rate_limiter.is_allowed(sender_jid)`. Returns 429 if sender exceeds `rate_limit_requests` (default 10) per `rate_limit_window_seconds` (default 60s).
-
-3. **Message ID extraction** — Two code paths:
-   - **Media messages** (`image`/`video`/`audio` is dict): `message_text = ""`, `replied_id = payload.get("replied_id")`, `message_id = payload.get("id") or payload.get("message", {}).get("id", "")`
-   - **Text messages**: `message_text = message_data.get("text")`, `message_id = message_data.get("id")`, `replied_id = message_data.get("replied_id")`
-
-4. **Event type detection** — By payload structure (see Event Type Detection above).
-
-5. **Own message skip** — If `message_id in akasha_message_ids`, return immediately.
-
-6. **Duplicate deduplication** — For actionable events only (`message.text`, `message.image`):
-   - Acquire `processed_message_lock` (asyncio.Lock)
-   - If `message_id in processed_message_ids`, skip
-   - Otherwise, mark `processed_message_ids[message_id] = time.time()` immediately inside lock
-
-7. **Media path caching** — If `file_path` and `id` present in payload: `media_file_paths[id] = (file_path, time.time())`
-
-8. **Lazy cleanup** — `cleanup_old_message_ids()` removes entries older than `MESSAGE_ID_TTL = 86400` (24h) from all three tracking dicts.
-
-9. **Service routing:**
-   - **Reply Agent (text):** `reply_agent.should_trigger(message_text)` (prefix `"hey akasha,"`) or `replied_id in akasha_message_ids` (reply-to-Akasha) → download quoted images if applicable → `asyncio.create_task(process_text_reply_background(...))`
-   - **Chat Summarizer:** `chat_summarizer.should_trigger(message_text)` (regex pattern `"akasha, summarize the previous N messages"`) → `asyncio.create_task(process_chat_summary_background(...))`
-   - **Reply Agent (image):** `isinstance(image_info, dict)` and (caption trigger or reply-to-Akasha) → download image → `asyncio.create_task(process_image_reply_background(...))`
-
-10. **Return 200** — `{"status": "ok"}` always returned (even on processing errors) to prevent GoWA retries.
-
----
+1. **Signature verification** — HMAC-SHA256 check (skipped if default secret)
+2. **Rate limit check** — `rate_limiter.is_allowed(sender_jid)`, returns 429 if exceeded
+3. **Message ID extraction** — Media: try `payload["id"]` then `payload["message"]["id"]`. Text: `payload["message"]["id"]`
+4. **Event type detection** — reaction / message.image / message.text / other
+5. **Own message skip** — Check `message_id` against `akasha_message_ids` dict
+6. **Duplicate prevention** — For actionable events, acquire `processed_message_lock`, check/mark `processed_message_ids`
+7. **Media path caching** — Store `{message_id: (file_path, timestamp)}` in `media_file_paths` if `file_path` present
+8. **Lazy cleanup** — `cleanup_old_message_ids()` removes entries older than 24h from all caches
+9. **Service routing**:
+   - Reply Agent (text): trigger phrase `"hey akasha,"` or reply-to-Akasha → `process_text_reply_background()`
+   - Chat Summarizer: `"akasha, summarize the previous N messages"` → `process_chat_summary_background()`
+   - Reply Agent (image): caption trigger or reply-to-Akasha → download image → `process_image_reply_background()`
+10. **Background task dispatch** — `asyncio.create_task()` for all LLM processing
+11. **Return** `{"status": "ok"}` immediately (even on errors, to prevent GoWA retries)
 
 ## Message ID Tracking
 
-Three in-memory caches in `src/main.py`:
+Three in-memory caches in `main.py`:
 
-| Cache | Type | Purpose |
-|-------|------|---------|
-| `akasha_message_ids` | `dict[str, float]` | Message IDs sent by Akasha (for self-skip and reply-to-Akasha detection) |
-| `processed_message_ids` | `dict[str, float]` | Already-processed message IDs (for deduplication). Protected by `processed_message_lock` (`asyncio.Lock`) |
-| `media_file_paths` | `dict[str, tuple[str, float]]` | Cached media `{message_id: (file_path, timestamp)}` from webhooks |
+| Cache | Type | Key | Value | Purpose |
+|-------|------|-----|-------|---------|
+| `akasha_message_ids` | `dict[str, float]` | message_id | timestamp | Track own messages to prevent self-replies |
+| `media_file_paths` | `dict[str, tuple[str, float]]` | message_id | (file_path, timestamp) | Cache auto-downloaded media paths for later download |
+| `processed_message_ids` | `dict[str, float]` | message_id | timestamp | Prevent duplicate processing of same message |
 
-**TTL:** `MESSAGE_ID_TTL = 86400` (24 hours)
-
-**Cleanup:** `cleanup_old_message_ids()` removes entries with timestamp < `time.time() - MESSAGE_ID_TTL`. Called:
-- Lazily on each webhook invocation
-- Every 30 minutes via scheduler job `cache_cleanup`
-
-**Population:**
-- `akasha_message_ids`: Populated in background tasks when `gowa_client.send_message()` returns `message_id` in results, and in error response functions
-- `processed_message_ids`: Populated immediately inside `processed_message_lock` when an actionable webhook is first seen
-- `media_file_paths`: Populated when webhook payload contains both `file_path` and `id` fields
-
----
+- **TTL**: `MESSAGE_ID_TTL = 86400` (24 hours)
+- **Cleanup**: `cleanup_old_message_ids()` — called lazily on each webhook + every 30 minutes via scheduler (`cache_cleanup` job)
+- **Concurrency protection**: `processed_message_lock` (`asyncio.Lock`) guards `processed_message_ids` checks to prevent TOCTOU race conditions
 
 ## Background Task GoWA Usage
 
-Background task functions in `src/core/background_tasks.py`:
+All background tasks in `src/core/background_tasks.py` follow the same pattern:
 
-### `process_text_reply_background()`
+1. Call `reply_agent.process_query()` or `chat_summarizer.summarize_messages()`
+2. Send response via `gowa_client.send_message(phone=reply_jid, message=response_text, reply_message_id=message_id)`
+3. Track sent `message_id` in `akasha_message_ids` for reply detection
+4. On error, call error response function
 
-1. Calls `reply_agent.process_query(query, quoted_context, image_data, image_mime_type)` → returns `(response_text, sources)`
-2. Calls `gowa_client.send_message(phone=reply_jid, message=response_text, reply_message_id=message_id)` — threads reply to original message
-3. Extracts `sent_message_id = result.get("message_id")` and adds to `akasha_message_ids`
-4. On exception: calls `_send_error_response()`
+**Background task functions:**
 
-### `process_image_reply_background()`
+| Function | Service | Error Handler |
+|----------|---------|---------------|
+| `process_text_reply_background()` | Reply Agent (text + optional quoted image) | `_send_error_response()` |
+| `process_image_reply_background()` | Reply Agent (direct image) | `_send_image_error_response()` |
+| `process_chat_summary_background()` | Chat Summarizer | `_send_error_response()` |
 
-Same pattern as text reply. On exception: calls `_send_image_error_response()`.
-
-### `process_chat_summary_background()`
-
-1. Calls `gowa_client.get_chat_messages(chat_jid, limit=message_count)` to fetch history
-2. Calls `chat_summarizer_service.summarize_messages(messages)` → returns `(summary, participants)`
-3. Formats response: `"*Chat Summary* ({N} messages)\n\n{summary}\n\n*Participants:* {sorted names}"`
-4. Calls `gowa_client.send_message()` with reply threading
-5. On exception: calls `_send_error_response()`
-
-### Error Response Functions
-
-**`_send_error_response(error, reply_jid, message_id, akasha_message_ids)`** — maps error patterns to user-friendly messages:
+**Error response patterns** (`_send_error_response()`):
 
 | Error Pattern | User Message |
 |---------------|-------------|
-| `"503"`, `"unavailable"`, `"overload"` | "The AI service is temporarily overloaded..." |
-| `"429"`, `"quota"`, `"rate"` | "I'm currently experiencing high demand..." |
-| `"exhausted"`, `"all api keys"` | "All my API resources are temporarily exhausted..." |
-| `"timeout"` | "The request took too long to process..." |
-| `"api"` + `"key"` | "I'm having trouble connecting to my AI service..." |
-| (default) | "Sorry, I encountered an error processing your request..." |
+| `503`, `unavailable`, `overload` | "The AI service is temporarily overloaded. I tried all available API keys but couldn't connect. Please try again in a moment." |
+| `429`, `quota`, `rate` | "I'm currently experiencing high demand and hit my rate limit. Please wait a moment and try again." |
+| `exhausted`, `all api keys` | "All my API resources are temporarily exhausted. Please try again in a few minutes." |
+| `timeout` | "The request took too long to process. Please try again with a simpler question." |
+| `api` + `key` | "I'm having trouble connecting to my AI service. Please notify the administrator." |
+| (default) | "Sorry, I encountered an error processing your request. Please try again." |
 
-**`_send_image_error_response()`** — similar mapping with additional:
+**Image error response patterns** (`_send_image_error_response()`):
 
 | Error Pattern | User Message |
 |---------------|-------------|
-| `"download"`, `"media"` | "I couldn't download the image..." |
+| `download`, `media` | "I couldn't download the image. Please try sending it again." |
+| `503`, `unavailable`, `overload` | "The AI service is temporarily overloaded. I tried all available API keys but couldn't connect. Please try again in a moment." |
+| `429`, `quota`, `rate` | "I'm currently experiencing high demand. Please wait a moment and try again." |
+| `exhausted`, `all api keys` | "All my API resources are temporarily exhausted. Please try again in a few minutes." |
+| (default) | "Sorry, I couldn't process the image. Please try again." |
 
-Both functions send the error message via `gowa_client.send_message()` with reply threading, and track the sent error message ID in `akasha_message_ids`.
-
----
+All error responses are sent via `gowa_client.send_message()` with `reply_message_id` threading, and the error message's ID is tracked in `akasha_message_ids`.
 
 ## GowaClientError
 
@@ -513,44 +369,36 @@ class GowaClientError(Exception):
 ```
 
 **Raised when:**
-- `send_message()`: response `code != "SUCCESS"`
-- `download_media()`: JSON response with no downloadable media (no `"downloaded successfully to"` pattern)
-- `download_media_from_path()`: response is JSON (expected binary)
-- `get_chat_messages()`: response `code != "SUCCESS"`
-- `get_user_info()`: response `code != "SUCCESS"`
+- `send_message()`: Response `code != "SUCCESS"`
+- `download_media()`: JSON response without successful file path, or no downloadable media
+- `download_media_from_path()`: Response is JSON (indicates failure)
+- `_fetch_chat_messages_page()`: Response `code != "SUCCESS"`
+- `get_user_info()`: Response `code != "SUCCESS"`
 
-**Handled by callers:**
-- `_send_to_recipient()` in `tasks.py` and `router.py`: catches `GowaClientError`, returns `(recipient, False, str(e))`
-- Background tasks: caught by outer `try/except`, triggers error response via `_send_error_response()`
-- `check_health()`: catches all exceptions, returns `False`
-
----
+**Handled by:**
+- `main.py` webhook handler: Image download failure → sends user-friendly error message
+- `background_tasks.py`: Caught by outer try/except → delegates to error response functions
+- `mandarin_generator/router.py` and `tasks.py` `_send_to_recipient()`: Caught and logged, doesn't crash the batch send
 
 ## Docker Setup
-
-### Services
 
 ```yaml
 services:
   akasha:
     build: .
     container_name: akasha
-    restart: unless-stopped
     ports: ["8080:8080"]
     depends_on:
-      whatsapp:
-        condition: service_started
+      whatsapp: { condition: service_started }
     env_file: [.env]
     environment:
       - GOWA_BASE_URL=http://whatsapp:3000
       - GOWA_USERNAME=user1
       - GOWA_PASSWORD=pass1
-    networks: [akasha-network]
 
   whatsapp:
     image: aldinokemal2104/go-whatsapp-web-multidevice:v7.9.0
     container_name: akasha-whatsapp
-    restart: always
     ports: ["3000:3000"]
     volumes: [whatsapp_data:/app/storages]
     environment:
@@ -562,112 +410,60 @@ services:
       - WHATSAPP_WEBHOOK_TIMEOUT=60
       - WHATSAPP_ACCOUNT_VALIDATION=true
       - whatsapp_auto_download_media=false
-    networks: [akasha-network]
 ```
 
-### Authentication Flow
-
-1. Start services: `docker-compose up -d`
-2. Open browser to `http://localhost:3000/app/login` for QR code
-3. Open WhatsApp on phone → Settings → Linked Devices → Link a Device → Scan QR
-4. Verify: `curl -u user1:pass1 http://localhost:3000/app/devices`
-
-### Session Persistence
-
-Session data stored in Docker volume `whatsapp_data` at `/app/storages`. Persists across container restarts — no need to re-scan QR after restart.
-
----
+**Authentication flow:**
+1. Start services: `docker compose up -d`
+2. Open browser: `http://localhost:3000/app/login`
+3. Scan QR code with WhatsApp mobile app
+4. Verify connection: `GET /app/devices` should return connected device info
+5. Session persisted in `whatsapp_data` volume — survives container restarts
 
 ## Important Notes
 
-### WhatsApp Web Protocol
-- GoWA uses WhatsApp Web protocol (not official WhatsApp Business API)
-- Works with personal WhatsApp accounts and WhatsApp Business app
-- Automated messaging may violate WhatsApp's ToS — use with awareness
-
-### Session Maintenance
-- Primary phone must come online **every 14 days** to keep linked devices active
-- If session expires, re-scan QR code required
-
-### Webhook Timeout for Image Processing
-- **Configured timeout**: 60 seconds (`WHATSAPP_WEBHOOK_TIMEOUT=60`)
-- **Why 60s**: LLM vision analysis typically takes 15-30+ seconds, plus download time
-- **Impact of insufficient timeout**: GoWA retries on timeout, causing duplicate webhook processing
-- **Mitigation**: Akasha marks messages as processed immediately inside `processed_message_lock` before dispatching background tasks
-
-### Duplicate Webhook Handling
-- GoWA sends multiple webhooks for the same message (e.g., `type=other` then `type=message.text`)
-- GoWA retries webhooks on timeout
-- Only actionable events (`message.text`, `message.image`) are deduplicated
-- `processed_message_lock` (asyncio.Lock) prevents TOCTOU race between concurrent webhook calls
-
----
+- **Protocol**: WhatsApp Web multi-device (not official Business API). Works with personal WhatsApp accounts.
+- **Session maintenance**: Phone must come online at least every 14 days to keep the session alive.
+- **Webhook timeout**: Must be >= 60s (`WHATSAPP_WEBHOOK_TIMEOUT=60`). Image processing with LLM vision typically takes 15-30s. If the timeout is too low, GoWA will retry the webhook, causing duplicate processing.
+- **Duplicate handling**: GoWA retries webhooks on timeout. Akasha marks messages as processed immediately inside `processed_message_lock` before dispatching background tasks, preventing duplicate processing even under webhook retries.
+- **Return 200 always**: The webhook handler returns `{"status": "ok"}` even on processing errors (in the outer try/except) to prevent GoWA from retrying failed messages.
 
 ## Troubleshooting
 
 ### Image Not Responding
 
-**Symptoms:**
-- Image sent with caption "hey akasha, ..." receives no response
-- Logs show webhook received but no LLM processing
-- Duplicate webhook messages appearing in logs
+**Symptoms:** User sends image with "hey akasha," caption or replies to Akasha with an image, but no response is sent.
 
-**Common Causes:**
+**Common causes:**
+1. **Message ID extraction failure** — No `id` found at top level or in `message` object. Check logs for: `"No message_id found in either top level or message object"`
+2. **Webhook timeout** — GoWA timeout too low, webhook retried, duplicate detected and skipped. Check for: `"Skipping already processed message"`
+3. **Media download failure** — All 3 download methods failed. Check for: `"Failed to download image:"` exception logs
+4. **Image not detected** — `payload.get("image")` is not a dict. Check logs for `event_type` — if it says `"other"` instead of `"message.image"`, the payload structure is unexpected
 
-1. **Message ID extraction failed**
-   - Logs show: `No message_id found in either top level or message object`
-   - Cause: Payload structure mismatch, ID in unexpected location
-   - Solution: Check `Payload keys:` and `message keys:` in warning log
-
-2. **Webhook timeout before LLM completes**
-   - Logs show: GoWA retry attempts (duplicate webhooks for same message)
-   - Cause: `WHATSAPP_WEBHOOK_TIMEOUT` too low
-   - Solution: Ensure `WHATSAPP_WEBHOOK_TIMEOUT=60` in docker-compose
-
-3. **Duplicate webhook processing skipped the real event**
-   - Logs show: `Skipping already processed message: {id}`
-   - Cause: GoWA sent `type=other` first (which was actionable-looking), then `type=message.image`
-   - Solution: Only actionable events are tracked — this is handled correctly
-
-4. **Media download failure**
-   - Logs show: `Failed to download media for quoted message` or `Failed to download image`
-   - Cause: GoWA media expired, phone offline, or incorrect phone JID for download
-   - Solution: Check phone JID format, ensure phone is online
-
-**Expected Logging Patterns (in order):**
-
+**Expected log sequence (success):**
 ```
-1. Found message_id at top level for media message
-2. Cached media file path for message {id}: statics/media/...
-3. Reply Agent (image) triggered by {sender}: query='...',
-   message_id={id}, from_jid={jid}, caption=hey akasha, ...
-4. Attempting image download via API: message_id={id}, phone={jid}
-   OR: Downloaded image from cached path: image/jpeg, {N} bytes
-5. Image downloaded successfully: image/jpeg, {N} bytes
-6. Image reply queued for background processing: {query}...
-7. Gemini processing multimodal query with image (image/jpeg)
-8. Reply Agent (image) response sent to {jid} (total processing time: {N}s)
+Found message_id at top level for media message
+Cached media file path for message ...: statics/media/...
+Reply Agent (image) triggered by {sender}: query='...', message_id=...
+Downloaded image from cached path: image/jpeg, 12345 bytes
+Image reply queued for background processing: ...
+Reply Agent (image) response sent to ... (total processing time: X.XXs)
 ```
 
-**Diagnosis Checklist:**
-- [ ] Message ID found (not empty) — check for `Found message_id` log
-- [ ] Trigger detected — check for `Reply Agent (image) triggered` log
-- [ ] Not skipped as duplicate — no `Skipping already processed message` log
-- [ ] Download attempted — check for `Attempting image download` or `Downloaded image from cached path`
-- [ ] Download successful — check for `Image downloaded successfully`
-- [ ] Background task dispatched — check for `Image reply queued for background processing`
-- [ ] LLM processing started — check for `Gemini processing multimodal query` or `OpenAI processing multimodal query`
-- [ ] Response sent — check for `Reply Agent (image) response sent`
-- [ ] Total time under 60s — check `total processing time` value
+**Diagnosis checklist:**
+1. Is `REPLY_AGENT_ENABLED=true`?
+2. Does the caption start with `"hey akasha,"` or is it a reply to an Akasha message?
+3. Is `message_id` present in the payload? (Check `"Payload keys:"` debug log)
+4. Did media download succeed? (Check for download-related warnings)
+5. Is `WHATSAPP_WEBHOOK_TIMEOUT` >= 60?
 
 ### Common Errors
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `GowaClientError: Failed to send message` | GoWA returned `code != "SUCCESS"` | Check GoWA logs, verify phone is logged in |
-| `"you are not logged in"` | WhatsApp session expired | Re-authenticate via `http://localhost:3000/app/login` |
-| `GowaClientError: No downloadable media` | Message has no downloadable media attachment | Expected for text-only messages; verify message actually has media |
-| `GowaClientError: Failed to download media from path` | Static file path invalid or expired | File may have been cleaned up; retry with on-demand API |
-| `httpx.ConnectError` | GoWA service unreachable | Check Docker network, verify `whatsapp` container is running |
-| `httpx.HTTPStatusError (401)` | Basic auth credentials wrong | Verify `GOWA_USERNAME`/`GOWA_PASSWORD` match `APP_BASIC_AUTH` |
-| JSON response from download API | Media auto-downloaded to disk | Client automatically extracts path and re-fetches from static server |
+| `GowaClientError: Failed to send message` | GoWA returned non-SUCCESS code | Check GoWA logs, verify device is connected |
+| `"you are not logged in"` | WhatsApp session expired | Re-scan QR at `/app/login` |
+| `httpx.ConnectError` | GoWA container down or unreachable | Check `docker compose ps`, verify `GOWA_BASE_URL` |
+| `GowaClientError: No downloadable media` | Message has no media or media expired | Media may have been deleted or is too old to download |
+| JSON response from download | GoWA auto-downloaded media to disk | Client handles this automatically by extracting path from `"Media downloaded successfully to {path}"` |
+| `"Failed to download from cached path"` | Cached file no longer exists on GoWA | Falls through to on-demand API download |
+| `httpx.HTTPStatusError: 401` | Wrong Basic Auth credentials | Verify `GOWA_USERNAME`/`GOWA_PASSWORD` match `APP_BASIC_AUTH` in docker-compose |
