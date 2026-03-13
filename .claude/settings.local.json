@@ -9,7 +9,12 @@
       "Bash(tree:*)",
       "Bash(dir:*)",
       "Bash(python:*)",
-      "Bash(uv run pytest:*)"
+      "Bash(uv run pytest:*)",
+      "Bash(find /c/Users/HP/Projects/akasha -maxdepth 2 -name .github -o -name *.yml -o -name *.yaml)",
+      "WebFetch(domain:github.com)",
+      "Bash(xargs wc:*)",
+      "Bash(find /c/Users/HP/Projects/akasha/src -type f -name \"*.py\" -exec grep -l \"json\\(\\)\" {})",
+      "Bash(uv lock:*)"
     ]
   }
 }
