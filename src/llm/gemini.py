@@ -77,8 +77,9 @@ class GeminiClient:
                     config=config,
                 )
 
-                logger.debug(f"Generated content with {len(response.text)} characters")
-                return response.text
+                text = response.text or ""
+                logger.debug(f"Generated content with {len(text)} characters")
+                return text
 
             except ClientError as e:
                 error_str = str(e).lower()
